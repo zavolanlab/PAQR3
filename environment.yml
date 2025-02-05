@@ -10,4 +10,5 @@ dependencies:
   - gtfparse
   - HTSeq
   - pybedtools
+  - ucsc-gtftogenepred
   - pip >=20.2.3
