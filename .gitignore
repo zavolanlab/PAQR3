@@ -172,4 +172,3 @@ cython_debug/
 
 data/*
 results/
-*.ipynb
