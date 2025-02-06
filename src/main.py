@@ -3,6 +3,7 @@ import argparse
 from datetime import datetime
 from filter_annotation import filter_annotation_by_gene_type, resolve_gene_overlaps
 from construct_segments import extend_exon_downstream, define_exons_introns, construct_segments, write_segments_to_gtf
+from identify_pas import identify_pas_in_segments, write_segments_pas_to_gtf
 from models import Gene, Transcript, Region
 
 # Utility function for timestamped messages
@@ -49,6 +50,7 @@ def main():
     parser.add_argument("--annotation", type=str, required=True, help="Path to the annotation GTF file.")
     parser.add_argument("--strandedness", type=str, default="true", choices=["true", "false"], help="Whether the data is stranded (true) or unstranded (false).")
     parser.add_argument("--downstream_exon_extension", type=int, default=200, help="Number of bases to extend terminal exons.")
+    parser.add_argument("--pas_atlas", type=str, required=True, help="Path to the PAS atlas BED file.")
     parser.add_argument("--output_regions", type=str, required=True, help="Path to the output GTF file for regions and segments.")
 
     args = parser.parse_args()
@@ -77,11 +79,15 @@ def main():
     log_message("Constructing segments...")
     genes = construct_segments(genes)
 
-    # Step 6: Write to GTF
-    log_message("Writing genes and segments to GTF...")
-    write_segments_to_gtf(genes, args.output_regions)
+    # Step 6: Identify PAS in segments
+    log_message("Identifying PAS sites in segments...")
+    genes = identify_pas_in_segments(genes, args.pas_atlas)
 
-    log_message("Genomic segment construction pipeline completed.")
+    # Step 7: Write to GTF (including PAS info)
+    log_message("Writing genes, segments and overlapping PAS to GTF...")
+    write_segments_pas_to_gtf(genes, args.output_regions)
+
+    log_message("Genomic segment construction and PAS identification pipeline completed.")
 
 
 if __name__ == "__main__":

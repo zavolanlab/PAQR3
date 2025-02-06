@@ -1,13 +1,11 @@
-from models import Gene, Transcript, Region
-from pybedtools import BedTool
+from models import Region
 from datetime import datetime
 
-# Utility function for timestamped messages
 def log_message(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
 
-def extend_exon_downstream(genes, downstream_exon_extension=200):  # Added parameter
+def extend_exon_downstream(genes, downstream_exon_extension=200):
     """Constructs regions, extending terminal exons per transcript."""
 
     log_message(f"Constructing regions with terminal exon extensions ({downstream_exon_extension} bp)...")
