@@ -3,7 +3,7 @@ import argparse
 from datetime import datetime
 from filter_annotation import filter_annotation_by_gene_type, resolve_gene_overlaps
 from construct_segments import extend_exon_downstream, define_exons_introns, construct_segments, write_segments_to_gtf
-from identify_pas import identify_pas_in_segments, write_segments_pas_to_gtf
+from detect_pas import identify_pas_in_segments, write_segments_pas_to_gtf
 from models import Gene, Transcript, Region
 
 # Utility function for timestamped messages
