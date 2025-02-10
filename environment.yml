@@ -10,5 +10,7 @@ dependencies:
   - gtfparse
   - HTSeq
   - pybedtools
+  - deeptools
   - ucsc-gtftogenepred
+  - ucsc-bedgraphtobigwig
   - pip >=20.2.3
