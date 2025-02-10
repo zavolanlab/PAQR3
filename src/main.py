@@ -2,8 +2,9 @@
 import argparse
 from datetime import datetime
 from filter_annotation import filter_annotation_by_gene_type, resolve_gene_overlaps
-from construct_segments import extend_exon_downstream, define_exons_introns, construct_segments, write_segments_to_gtf
+from construct_segments import extend_exon_downstream, define_exons_introns, construct_segments
 from detect_pas import identify_pas_in_segments, write_segments_pas_to_gtf
+from calculate_mean_coverage import calculate_mean_coverage, write_coverage_results
 from models import Gene, Transcript, Region
 
 # Utility function for timestamped messages
@@ -52,6 +53,9 @@ def main():
     parser.add_argument("--downstream_exon_extension", type=int, default=200, help="Number of bases to extend terminal exons.")
     parser.add_argument("--pas_atlas", type=str, required=True, help="Path to the PAS atlas BED file.")
     parser.add_argument("--output_regions", type=str, required=True, help="Path to the output GTF file for regions and segments.")
+    parser.add_argument("--coverage", type=str, required=True, help="Path to the coverage BED file.")
+    parser.add_argument("--output_coverage", type=str, required=True, help="Path to output TSV file for coverage results.")
+
 
     args = parser.parse_args()
 
@@ -87,7 +91,15 @@ def main():
     log_message("Writing genes, segments and overlapping PAS to GTF...")
     write_segments_pas_to_gtf(genes, args.output_regions)
 
-    log_message("Genomic segment construction and PAS identification pipeline completed.")
+    # Step 8: Calculate mean coverage
+    log_message("Calculating mean coverage...")
+    coverage_results = calculate_mean_coverage(genes, args.coverage)
+
+    # Step 9: Write coverage results
+    log_message("Writing coverage results...")
+    write_coverage_results(coverage_results, args.output_coverage)
+
+    log_message("Genomic segment construction, PAS identification and coverage calculation pipeline completed.")
 
 
 if __name__ == "__main__":
