@@ -45,8 +45,6 @@ def extend_exon_downstream(genes, downstream_exon_extension=200):
 def define_exons_introns(genes):
     """Constructs exons and introns for all transcripts."""
 
-    log_message("Defining exons and introns...")
-
     for gene in genes.values():
         for transcript in gene.transcripts.values():
             transcript.regions.sort(key=lambda r: r.start)  # Ensure regions are sorted
@@ -80,8 +78,6 @@ def define_exons_introns(genes):
 
 def construct_segments(genes):
     """Constructs segments based on all transcripts of a gene."""
-
-    log_message("Constructing segments...")
 
     for gene in genes.values():
         # Get strand from any of the transcripts (assuming all transcripts of a gene are on the same strand)

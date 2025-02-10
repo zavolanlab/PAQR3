@@ -8,7 +8,7 @@ def log_message(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
 
-def filter_annotation_by_gene_type(gtf_file, gene_types=["protein_coding", "lncRNA"]):
+def filter_annotation_by_gene_type(gtf_file, gene_types=["protein_coding"]):
     """Filters GTF by gene type, handling case variations for lncRNA."""
 
     log_message("Reading the GTF file...")

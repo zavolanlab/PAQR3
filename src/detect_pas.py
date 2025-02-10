@@ -53,12 +53,12 @@ def write_segments_pas_to_gtf(genes, output_file):
 
     with open(output_file, "w") as f:
         for gene in genes.values():
-            f.write(gene.to_gtf_format() + "\n")  # Write gene information
+            f.write(gene.to_gtf_format() + "\n")
             for segment in gene.segments:
                 segment_line = segment.to_gtf_format()
                 if "overlapping_pas" in segment.attributes:
                     pas_list = ",".join(segment.attributes["overlapping_pas"])
                     segment_line = segment_line.replace(";", f'; overlapping_pas "{pas_list}";')
-                f.write(segment_line + "\n")  # Write segment and PAS information
+                f.write(segment_line + "\n")
 
     log_message(f"Genes, segments and overlapping PAS written to {output_file}")
