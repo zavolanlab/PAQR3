@@ -1,4 +1,3 @@
-
 import argparse
 from datetime import datetime
 from filter_annotation import filter_annotation_by_gene_type, resolve_gene_overlaps
