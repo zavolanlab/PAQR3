@@ -1,10 +1,11 @@
 import argparse
 from datetime import datetime
-from filter_annotation import filter_annotation_by_gene_type, resolve_gene_overlaps
-from construct_segments import extend_exon_downstream, define_exons_introns, construct_segments
-from detect_pas import identify_pas_in_segments, write_segments_pas_to_gtf
-from calculate_mean_coverage import calculate_mean_coverage, write_coverage_results
-from models import Gene, Transcript, Region
+from paqr3.version import __version__
+from paqr3.filter_annotation import filter_annotation_by_gene_type, resolve_gene_overlaps
+from paqr3.construct_segments import extend_exon_downstream, define_exons_introns, construct_segments
+from paqr3.detect_pas import identify_pas_in_segments, write_segments_pas_to_gtf
+from paqr3.calculate_mean_coverage import calculate_mean_coverage, write_coverage_results
+from paqr3.models import Gene, Transcript, Region
 
 # Utility function for timestamped messages
 def log_message(message):
@@ -54,6 +55,13 @@ def main():
     parser.add_argument("--output_regions", type=str, required=True, help="Path to the output GTF file for regions and segments.")
     parser.add_argument("--coverage", type=str, required=True, help="Path to the coverage BED file.")
     parser.add_argument("--output_coverage", type=str, required=True, help="Path to output TSV file for coverage results.")
+    parser.add_argument(
+        "--version",
+        "-v",
+        action="version",
+        version=f"PAQR3 v{__version__}, (c) 2025 by Zavolab (zavolab-biozentrum@unibas.ch)",
+        help="show version information and exit",
+    )
 
 
     args = parser.parse_args()

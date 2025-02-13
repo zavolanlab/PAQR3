@@ -1,4 +1,4 @@
-from models import Region
+from paqr3.models import Region
 from datetime import datetime
 
 def log_message(message):
