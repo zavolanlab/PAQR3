@@ -8,7 +8,7 @@ It processes annotation files (GTF), PAS atlases (BED), and coverage data (BED) 
 ### Using conda (recommended)
 
 ```bash
-conda create -f environment.yml
+conda create -f install/environment.yml
 conda activate paqr3
 ```
 
