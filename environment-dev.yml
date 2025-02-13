@@ -19,3 +19,5 @@ dependencies:
   - mypy >=0.782
   - flake8 >=3.8.4
   - coverage >=5.3
+  - pip:
+    - -e .

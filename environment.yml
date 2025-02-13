@@ -14,3 +14,5 @@ dependencies:
   - ucsc-gtftogenepred
   - ucsc-bedgraphtobigwig
   - pip >=20.2.3
+  - pip:
+    - -e .
