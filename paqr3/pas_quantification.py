@@ -1,7 +1,5 @@
 import argparse
 import pybedtools
-import copy
-import pandas as pd
 from gtfparse import read_gtf
 
 # Define a class to hold information about each region in the transcript

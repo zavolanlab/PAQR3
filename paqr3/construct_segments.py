@@ -1,26 +1,25 @@
-from models import Gene, Transcript, Region
-from pybedtools import BedTool
+from paqr3.models import Region
 from datetime import datetime
 
-# Utility function for timestamped messages
 def log_message(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
 
-def extend_exon_downstream(genes, downstream_exon_extension=200):  # Added parameter
-    """Constructs regions, extending terminal exons per transcript."""
+def extend_exon_downstream(genes, downstream_exon_extension=200):
+    """Extends terminal exons per transcript, updating gene coordinates."""
 
-    log_message(f"Constructing regions with terminal exon extensions ({downstream_exon_extension} bp)...")
+    log_message(f"Extending terminal exons ({downstream_exon_extension} bp)...")
 
     for gene in genes.values():
-        # Find the longest transcript for boundary checks
-        longest_transcript = max(gene.transcripts.values(), key=lambda t: max((r.end - r.start) for r in t.regions) if t.regions else 0) if gene.transcripts else None
-        longest_transcript_start = min(r.start for r in longest_transcript.regions) if longest_transcript else float('inf')
-        longest_transcript_end = max(r.end for r in longest_transcript.regions) if longest_transcript else float('-inf')
+        # Find the longest transcript for boundary checks (using max exon end)
+        longest_transcript_end = float('-inf')
+        for transcript in gene.transcripts.values():
+            if transcript.regions:
+                terminal_exon = max(transcript.regions, key=lambda r: r.end if r.region_type == "exon" else -1)
+                longest_transcript_end = max(longest_transcript_end, terminal_exon.end)
 
         for transcript in gene.transcripts.values():
-            # Extend terminal exon for the current transcript
-            if transcript.regions:  # Check if there are any regions (transcripts can be empty)
+            if transcript.regions:
                 terminal_exon = max(transcript.regions, key=lambda r: r.end if r.region_type == "exon" else -1)
 
                 if terminal_exon.strand == "+":
@@ -29,8 +28,9 @@ def extend_exon_downstream(genes, downstream_exon_extension=200):  # Added param
                     terminal_exon.end = extended_end
                 elif terminal_exon.strand == "-":
                     extended_start = terminal_exon.start - downstream_exon_extension
-                    extended_start = max(extended_start, longest_transcript_start)  # Boundary check
+                    extended_start = max(extended_start, longest_transcript_end)  # Boundary check
                     terminal_exon.start = extended_start
+
         # Update gene coordinates based on the *extended* transcripts
         gene_start = min(r.start for t in gene.transcripts.values() for r in t.regions) if gene.transcripts else float('inf')
         gene_end = max(r.end for t in gene.transcripts.values() for r in t.regions) if gene.transcripts else float('-inf')
@@ -44,10 +44,9 @@ def extend_exon_downstream(genes, downstream_exon_extension=200):  # Added param
     return genes
 
 
+
 def define_exons_introns(genes):
     """Constructs exons and introns for all transcripts."""
-
-    log_message("Defining exons and introns...")
 
     for gene in genes.values():
         for transcript in gene.transcripts.values():
@@ -82,8 +81,6 @@ def define_exons_introns(genes):
 
 def construct_segments(genes):
     """Constructs segments based on all transcripts of a gene."""
-
-    log_message("Constructing segments...")
 
     for gene in genes.values():
         # Get strand from any of the transcripts (assuming all transcripts of a gene are on the same strand)

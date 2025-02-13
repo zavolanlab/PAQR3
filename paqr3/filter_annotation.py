@@ -8,7 +8,7 @@ def log_message(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
 
-def filter_annotation_by_gene_type(gtf_file, gene_types=["protein_coding", "lncRNA"]):
+def filter_annotation_by_gene_type(gtf_file, gene_types=["protein_coding"]):
     """Filters GTF by gene type, handling case variations for lncRNA."""
 
     log_message("Reading the GTF file...")
@@ -137,14 +137,3 @@ def resolve_gene_overlaps(filtered_gtf, strandedness=True):
       updated_gtf.loc[(updated_gtf["gene_id"] == gene_id) & (updated_gtf["feature"] != "gene"), "end"] = updated_gtf.loc[(updated_gtf["gene_id"] == gene_id) & (updated_gtf["feature"] != "gene"), "end"].apply(lambda x: min(x, new_end))
 
     return updated_gtf
-
-def write_filtered_gtf(updated_gtf, output_file):
-    """
-    Write the filtered GTF data to a new file.
-
-    Args:
-        updated_gtf (pd.DataFrame): Filtered GTF data.
-        output_file (str): Path to the output GTF file.
-    """
-    updated_gtf.to_csv(output_file, sep="\t", header=False, index=False, quoting=None)
-    log_message(f"Filtered GTF written to {output_file}")
