@@ -57,4 +57,4 @@ Contributions are welcome! Please see the contributing guidelines for more infor
 
 ## License
 
-Apache License 2.0
+GNU General Public License v2.0
