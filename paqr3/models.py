@@ -22,7 +22,9 @@ class Region:
     def to_gtf_format(self):
         """Convert the Region object to a GTF format string."""
         attr_str = (
-            "; ".join([f'{key} "{value}"' for key, value in self.attributes.items()])
+            "; ".join(
+                [f'{key} "{value}"' for key, value in self.attributes.items()]
+            )
             + ";"
         )
         return f"{self.chrom}\t{self.attributes.get('source', 'unknown')}\t{self.region_type}\t{self.start}\t{self.end}\t.\t{self.strand}\t.\t{attr_str}"
@@ -48,7 +50,9 @@ class Transcript:
     def to_gtf_format(self):
         """Convert the Transcript object to a GTF format string."""
         attr_str = (
-            "; ".join([f'{key} "{value}"' for key, value in self.attributes.items()])
+            "; ".join(
+                [f'{key} "{value}"' for key, value in self.attributes.items()]
+            )
             + ";"
         )
         start = min(region.start for region in self.regions)
@@ -71,7 +75,9 @@ class Gene:
     def to_gtf_format(self):
         """Convert the Gene object to a GTF format string."""
         attr_str = (
-            "; ".join([f'{key} "{value}"' for key, value in self.attributes.items()])
+            "; ".join(
+                [f'{key} "{value}"' for key, value in self.attributes.items()]
+            )
             + ";"
         )
         start = min(

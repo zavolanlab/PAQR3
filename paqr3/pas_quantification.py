@@ -29,7 +29,9 @@ class Region:
     def to_gtf_format(self):
         """Convert the Region object to a GTF format string."""
         attr_str = (
-            "; ".join([f'{key} "{value}"' for key, value in self.attributes.items()])
+            "; ".join(
+                [f'{key} "{value}"' for key, value in self.attributes.items()]
+            )
             + ";"
         )
         return f"{self.chrom}\t{self.attributes.get('source', 'unknown')}\t{self.region_type}\t{self.start}\t{self.end}\t.\t{self.strand}\t.\t{attr_str}"
@@ -56,7 +58,9 @@ class Transcript:
     def to_gtf_format(self):
         """Convert the Transcript object to a GTF format string."""
         attr_str = (
-            "; ".join([f'{key} "{value}"' for key, value in self.attributes.items()])
+            "; ".join(
+                [f'{key} "{value}"' for key, value in self.attributes.items()]
+            )
             + ";"
         )
         start = min(region.start for region in self.regions)
@@ -80,7 +84,9 @@ class Gene:
     def to_gtf_format(self):
         """Convert the Gene object to a GTF format string."""
         attr_str = (
-            "; ".join([f'{key} "{value}"' for key, value in self.attributes.items()])
+            "; ".join(
+                [f'{key} "{value}"' for key, value in self.attributes.items()]
+            )
             + ";"
         )
         start = min(
@@ -105,7 +111,7 @@ class Gene:
         return f"Gene: {self.gene_id}, Transcripts: {self.transcripts}"
 
 
-# Function to read the GTF file and create gene and transcript objects with exon regions
+# Function to read the GTF file and create gene and transcript objects with exon regionsssss
 def read_gtf_file(gtf_file):
     # Read GTF file into a pandas dataframe
     gtf_data = read_gtf(gtf_file, result_type="pandas")
@@ -120,7 +126,9 @@ def read_gtf_file(gtf_file):
     for _, row in exons.iterrows():
         gene_id = row["gene_id"]
         transcript_id = row["transcript_id"]
-        exon_number = int(row.get("exon_number", -1))  # Default to -1 if missing
+        exon_number = int(
+            row.get("exon_number", -1)
+        )  # Default to -1 if missing
         chrom = row["seqname"]  # Extract chromosome name
         start = row["start"]
         end = row["end"]
@@ -142,14 +150,22 @@ def read_gtf_file(gtf_file):
 
         # Get or create the transcript
         if transcript_id not in gene.transcripts:
-            transcript = Transcript(transcript_id, strand, transcript_attributes)
+            transcript = Transcript(
+                transcript_id, strand, transcript_attributes
+            )
             gene.add_transcript(transcript)
         else:
             transcript = gene.transcripts[transcript_id]
 
         # Create the exon region and add to the transcript
         exon_region = Region(
-            "exon", chrom, start, end, strand, exon_number, attributes=exon_attributes
+            "exon",
+            chrom,
+            start,
+            end,
+            strand,
+            exon_number,
+            attributes=exon_attributes,
         )
         transcript.add_region(exon_region)
 
@@ -231,11 +247,15 @@ def construct_contiguous_regions(genes):
         regions = []
         for i in range(len(sorted_boundaries) - 1):
             start = sorted_boundaries[i]
-            end = sorted_boundaries[i + 1] - 1  # Adjust to make the region inclusive
+            end = (
+                sorted_boundaries[i + 1] - 1
+            )  # Adjust to make the region inclusive
             if start <= end:  # Only include valid regions
                 # Ensure there are no gaps between regions
                 if regions and start != regions[-1][1] + 1:
-                    start = regions[-1][1] + 1  # Adjust to make regions contiguous
+                    start = (
+                        regions[-1][1] + 1
+                    )  # Adjust to make regions contiguous
                 regions.append((start, end))
 
         # Replace transcript regions with the newly constructed regions
@@ -281,7 +301,12 @@ def write_regions_to_gtf(genes, output_file):
             unique_regions = set()  # Ensure no duplicate regions
             for transcript in gene.transcripts.values():
                 for region in transcript.regions:
-                    region_key = (region.chrom, region.start, region.end, region.strand)
+                    region_key = (
+                        region.chrom,
+                        region.start,
+                        region.end,
+                        region.strand,
+                    )
                     if region_key not in unique_regions:
                         unique_regions.add(region_key)
                         f.write(region.to_gtf_format() + "\n")
@@ -330,7 +355,9 @@ def filter_regions_with_pas_and_track_overlaps(genes, pas_bed_file):
                 )
 
                 # Check for overlaps with PAS
-                overlaps = pas_bed.intersect(pybedtools.BedTool([region_bed]), wa=True)
+                overlaps = pas_bed.intersect(
+                    pybedtools.BedTool([region_bed]), wa=True
+                )
 
                 valid_pas_ids = set()  # Use a set to avoid duplicate PAS IDs
                 for pas_interval in overlaps:
@@ -348,7 +375,9 @@ def filter_regions_with_pas_and_track_overlaps(genes, pas_bed_file):
 
                 if valid_pas_ids:
                     # Add region and its PAS IDs to the dictionary
-                    region_pas_map[region] = list(valid_pas_ids)  # Convert set to list
+                    region_pas_map[region] = list(
+                        valid_pas_ids
+                    )  # Convert set to list
 
     return region_pas_map
 
@@ -359,10 +388,16 @@ def main():
         description="Quantify PAS usage from RNA-Seq alignments."
     )
     parser.add_argument(
-        "--annotation", type=str, required=True, help="Path to the annotation GTF file."
+        "--annotation",
+        type=str,
+        required=True,
+        help="Path to the annotation GTF file.",
     )
     parser.add_argument(
-        "--pas_atlas", type=str, required=True, help="Path to the PAS atlas BED file."
+        "--pas_atlas",
+        type=str,
+        required=True,
+        help="Path to the PAS atlas BED file.",
     )
     parser.add_argument(
         "--coverage",

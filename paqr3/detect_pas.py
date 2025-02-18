@@ -69,7 +69,9 @@ def identify_pas_in_segments(genes, pas_atlas_bed):
                                 strand=strand,
                                 attributes={
                                     "gene_id": gene.gene_id,
-                                    "segment_id": segment.attributes["segment_number"],
+                                    "segment_id": segment.attributes[
+                                        "segment_number"
+                                    ],
                                     "subsegment_number": len(subsegments) + 1,
                                     "strand": strand,
                                 },  # Added strand
@@ -86,7 +88,9 @@ def identify_pas_in_segments(genes, pas_atlas_bed):
                             strand=strand,
                             attributes={
                                 "gene_id": gene.gene_id,
-                                "segment_id": segment.attributes["segment_number"],
+                                "segment_id": segment.attributes[
+                                    "segment_number"
+                                ],
                                 "subsegment_number": len(subsegments) + 1,
                                 "strand": strand,
                             },  # Added strand
@@ -109,7 +113,9 @@ def identify_pas_in_segments(genes, pas_atlas_bed):
                             strand=strand,
                             attributes={
                                 "gene_id": gene.gene_id,
-                                "segment_id": segment.attributes["segment_number"],
+                                "segment_id": segment.attributes[
+                                    "segment_number"
+                                ],
                                 "subsegment_number": len(subsegments) + 1,
                                 "strand": strand,
                             },  # Added strand

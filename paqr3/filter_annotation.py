@@ -28,7 +28,9 @@ def filter_annotation_by_gene_type(gtf_file, gene_types=["protein_coding"]):
     log_message(f"Found {len(valid_genes)} genes matching the criteria.")
 
     filtered_gtf = gtf_data[gtf_data["gene_id"].isin(valid_genes)]
-    filtered_gtf = filtered_gtf.drop(columns="gene_type_lower")  # Drop temporary column
+    filtered_gtf = filtered_gtf.drop(
+        columns="gene_type_lower"
+    )  # Drop temporary column
 
     return filtered_gtf
 
@@ -74,7 +76,9 @@ def resolve_gene_overlaps(filtered_gtf, strandedness=True):
         group_key = (chrom, strand) if strandedness else (chrom,)
         if group_key not in overlap_groups:
             overlap_groups[group_key] = []
-        overlap_groups[group_key].append((gene1, gene2, start1, end1, start2, end2))
+        overlap_groups[group_key].append(
+            (gene1, gene2, start1, end1, start2, end2)
+        )
 
     for group_key, overlaps_in_group in overlap_groups.items():
         genes_in_group = set()
@@ -86,7 +90,8 @@ def resolve_gene_overlaps(filtered_gtf, strandedness=True):
         regions_to_update_in_group = {}
 
         overlaps_in_group.sort(
-            key=lambda x: x[5] - x[4] if x[5] > x[4] else x[3] - x[2], reverse=True
+            key=lambda x: x[5] - x[4] if x[5] > x[4] else x[3] - x[2],
+            reverse=True,
         )
 
         updated_genes = set()
@@ -95,21 +100,32 @@ def resolve_gene_overlaps(filtered_gtf, strandedness=True):
             if gene1 == gene2:
                 continue
 
-            if gene1 in genes_to_remove_in_group or gene2 in genes_to_remove_in_group:
+            if (
+                gene1 in genes_to_remove_in_group
+                or gene2 in genes_to_remove_in_group
+            ):
                 continue
 
             overlap_start = max(start1, start2)
             overlap_end = min(end1, end2)
             overlap_len = overlap_end - overlap_start
 
-            if start1 <= start2 and end1 >= end2:  # Gene1 completely overlaps Gene2
+            if (
+                start1 <= start2 and end1 >= end2
+            ):  # Gene1 completely overlaps Gene2
                 genes_to_remove_in_group.add(
-                    gene2 if gene_lengths[gene1] >= gene_lengths[gene2] else gene1
+                    gene2
+                    if gene_lengths[gene1] >= gene_lengths[gene2]
+                    else gene1
                 )
 
-            elif start2 <= start1 and end2 >= end1:  # Gene2 completely overlaps Gene1
+            elif (
+                start2 <= start1 and end2 >= end1
+            ):  # Gene2 completely overlaps Gene1
                 genes_to_remove_in_group.add(
-                    gene1 if gene_lengths[gene2] >= gene_lengths[gene1] else gene2
+                    gene1
+                    if gene_lengths[gene2] >= gene_lengths[gene1]
+                    else gene2
                 )
 
             elif overlap_len > 0:  # Partial overlap
@@ -140,7 +156,9 @@ def resolve_gene_overlaps(filtered_gtf, strandedness=True):
                     else overlap_end + 1
                 )
                 new_end1 = (
-                    current_end1 if current_end1 > overlap_end else overlap_start - 1
+                    current_end1
+                    if current_end1 > overlap_end
+                    else overlap_start - 1
                 )
                 new_start2 = (
                     current_start2
@@ -148,7 +166,9 @@ def resolve_gene_overlaps(filtered_gtf, strandedness=True):
                     else overlap_end + 1
                 )
                 new_end2 = (
-                    current_end2 if current_end2 > overlap_end else overlap_start - 1
+                    current_end2
+                    if current_end2 > overlap_end
+                    else overlap_start - 1
                 )
 
                 if new_start1 <= new_end1:
@@ -161,7 +181,9 @@ def resolve_gene_overlaps(filtered_gtf, strandedness=True):
         genes_to_remove.update(genes_to_remove_in_group)
         regions_to_update.update(regions_to_update_in_group)
 
-    log_message(f"Removing {len(genes_to_remove)} completely overlapping genes.")
+    log_message(
+        f"Removing {len(genes_to_remove)} completely overlapping genes."
+    )
     filtered_gtf = filtered_gtf[~filtered_gtf["gene_id"].isin(genes_to_remove)]
 
     # Update exon coordinates based on resolved gene overlaps
@@ -170,19 +192,23 @@ def resolve_gene_overlaps(filtered_gtf, strandedness=True):
 
     for gene_id, (new_start, new_end) in regions_to_update.items():
         updated_gtf.loc[
-            (updated_gtf["gene_id"] == gene_id) & (updated_gtf["feature"] != "gene"),
+            (updated_gtf["gene_id"] == gene_id)
+            & (updated_gtf["feature"] != "gene"),
             "start",
         ] = updated_gtf.loc[
-            (updated_gtf["gene_id"] == gene_id) & (updated_gtf["feature"] != "gene"),
+            (updated_gtf["gene_id"] == gene_id)
+            & (updated_gtf["feature"] != "gene"),
             "start",
         ].apply(
             lambda x: max(x, new_start)
         )
         updated_gtf.loc[
-            (updated_gtf["gene_id"] == gene_id) & (updated_gtf["feature"] != "gene"),
+            (updated_gtf["gene_id"] == gene_id)
+            & (updated_gtf["feature"] != "gene"),
             "end",
         ] = updated_gtf.loc[
-            (updated_gtf["gene_id"] == gene_id) & (updated_gtf["feature"] != "gene"),
+            (updated_gtf["gene_id"] == gene_id)
+            & (updated_gtf["feature"] != "gene"),
             "end",
         ].apply(
             lambda x: min(x, new_end)

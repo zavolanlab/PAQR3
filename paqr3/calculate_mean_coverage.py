@@ -32,7 +32,9 @@ def calculate_mean_coverage(genes, coverage_bw_pos, coverage_bw_neg):
                     elif subsegment_strand == "-":
                         bw = bw_neg
                     else:
-                        raise ValueError(f"Invalid strand: {subsegment_strand}")
+                        raise ValueError(
+                            f"Invalid strand: {subsegment_strand}"
+                        )
 
                     if subsegment_start < subsegment_end:
                         try:
@@ -47,7 +49,9 @@ def calculate_mean_coverage(genes, coverage_bw_pos, coverage_bw_neg):
                     else:
                         coverage = np.array([])
 
-                    mean_coverage = np.nanmean(coverage) if len(coverage) > 0 else 0
+                    mean_coverage = (
+                        np.nanmean(coverage) if len(coverage) > 0 else 0
+                    )
 
                     results.append(
                         [
@@ -133,7 +137,9 @@ def write_coverage_results(
 
             unique_gene_id = gene_mapping[gene_id]
 
-            gene = next((g for g in genes.values() if g.gene_id == gene_id), None)
+            gene = next(
+                (g for g in genes.values() if g.gene_id == gene_id), None
+            )
             if gene:
                 first_transcript = next(iter(gene.transcripts.values()), None)
                 chrom = (
@@ -157,7 +163,9 @@ def write_coverage_results(
                     ),
                     max(
                         list(
-                            r.end for t in gene.transcripts.values() for r in t.regions
+                            r.end
+                            for t in gene.transcripts.values()
+                            for r in t.regions
                         )
                     ),
                     strand,
