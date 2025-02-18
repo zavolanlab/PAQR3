@@ -2,17 +2,30 @@ import argparse
 import os
 from datetime import datetime
 from paqr3.version import __version__
-from paqr3.filter_annotation import filter_annotation_by_gene_type, resolve_gene_overlaps
-from paqr3.construct_segments import extend_gene_coordinates, extend_exon_downstream, define_exons_introns, construct_segments
+from paqr3.filter_annotation import (
+    filter_annotation_by_gene_type,
+    resolve_gene_overlaps,
+)
+from paqr3.construct_segments import (
+    extend_gene_coordinates,
+    extend_exon_downstream,
+    define_exons_introns,
+    construct_segments,
+)
 from paqr3.detect_pas import identify_pas_in_segments, write_segments_pas_to_gtf
-from paqr3.calculate_mean_coverage import calculate_mean_coverage, write_coverage_results
+from paqr3.calculate_mean_coverage import (
+    calculate_mean_coverage,
+    write_coverage_results,
+)
 from paqr3.models import Gene, Transcript, Region
 import pandas as pd
+
 
 # Utility function for timestamped messages
 def log_message(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
+
 
 def parse_gtf_to_genes(gtf_data):
     """Parses GTF data (pandas DataFrame) into a dictionary of Gene objects."""
@@ -20,21 +33,65 @@ def parse_gtf_to_genes(gtf_data):
     for _, row in gtf_data.iterrows():
         if row["feature"] == "gene":
             gene_id = row["gene_id"]
-            gene_attributes = {k: v for k, v in row.items() if k not in ["seqname", "source", "feature", "start", "end", "score", "strand"]}
+            gene_attributes = {
+                k: v
+                for k, v in row.items()
+                if k
+                not in [
+                    "seqname",
+                    "source",
+                    "feature",
+                    "start",
+                    "end",
+                    "score",
+                    "strand",
+                ]
+            }
             gene = Gene(gene_id, attributes=gene_attributes)
             genes[gene_id] = gene
         elif row["feature"] == "transcript":
             gene_id = row["gene_id"]
             transcript_id = row["transcript_id"]
-            transcript_attributes = {k: v for k, v in row.items() if k not in ["seqname", "source", "feature", "start", "end", "score", "strand", "gene_id"]}
+            transcript_attributes = {
+                k: v
+                for k, v in row.items()
+                if k
+                not in [
+                    "seqname",
+                    "source",
+                    "feature",
+                    "start",
+                    "end",
+                    "score",
+                    "strand",
+                    "gene_id",
+                ]
+            }
 
             if gene_id in genes:
-                transcript = Transcript(transcript_id, row["strand"], attributes=transcript_attributes)
+                transcript = Transcript(
+                    transcript_id, row["strand"], attributes=transcript_attributes
+                )
                 genes[gene_id].add_transcript(transcript)
         elif row["feature"] == "exon":
             gene_id = row["gene_id"]
             transcript_id = row["transcript_id"]
-            exon_attributes = {k: v for k, v in row.items() if k not in ["seqname", "source", "feature", "start", "end", "score", "strand", "gene_id", "transcript_id"]}
+            exon_attributes = {
+                k: v
+                for k, v in row.items()
+                if k
+                not in [
+                    "seqname",
+                    "source",
+                    "feature",
+                    "start",
+                    "end",
+                    "score",
+                    "strand",
+                    "gene_id",
+                    "transcript_id",
+                ]
+            }
             if gene_id in genes and transcript_id in genes[gene_id].transcripts:
                 exon = Region(
                     region_type="exon",
@@ -42,19 +99,52 @@ def parse_gtf_to_genes(gtf_data):
                     start=row["start"],
                     end=row["end"],
                     strand=row["strand"],
-                    attributes=exon_attributes
+                    attributes=exon_attributes,
                 )
                 genes[gene_id].transcripts[transcript_id].add_region(exon)
 
     return genes
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Filter and construct genomic segments from RNA-Seq annotations.")
-    parser.add_argument("--annotation", "-a", type=str, required=True, help="Path to the annotation GTF file.")
-    parser.add_argument("--downstream_exon_extension", type=int, default=200, help="Number of bases to extend terminal exons.")
-    parser.add_argument("--pas_atlas", "-pa", type=str, required=True, help="Path to the PAS atlas BED file.")
-    parser.add_argument("--coverage", "-c", type=str, required=True, nargs=2, help="Paths to the positive and negative strand coverage bigWig files (e.g., pos.bw neg.bw).")
-    parser.add_argument("--output_dir", "-o", type=str, required=True, help="Path to the output directory.")
+    parser = argparse.ArgumentParser(
+        description="Filter and construct genomic segments from RNA-Seq annotations."
+    )
+    parser.add_argument(
+        "--annotation",
+        "-a",
+        type=str,
+        required=True,
+        help="Path to the annotation GTF file.",
+    )
+    parser.add_argument(
+        "--downstream_exon_extension",
+        type=int,
+        default=200,
+        help="Number of bases to extend terminal exons.",
+    )
+    parser.add_argument(
+        "--pas_atlas",
+        "-pa",
+        type=str,
+        required=True,
+        help="Path to the PAS atlas BED file.",
+    )
+    parser.add_argument(
+        "--coverage",
+        "-c",
+        type=str,
+        required=True,
+        nargs=2,
+        help="Paths to the positive and negative strand coverage bigWig files (e.g., pos.bw neg.bw).",
+    )
+    parser.add_argument(
+        "--output_dir",
+        "-o",
+        type=str,
+        required=True,
+        help="Path to the output directory.",
+    )
     parser.add_argument(
         "--version",
         "-v",
@@ -86,7 +176,7 @@ def main():
 
     # Step 1: Filter annotation
     filtered_gtf = filter_annotation_by_gene_type(args.annotation)
-    stranded = True #Stranded is assumed
+    stranded = True  # Stranded is assumed
     log_message(f"Resolving gene overlaps (strandedness: {stranded})...")
     filtered_gtf = resolve_gene_overlaps(filtered_gtf, strandedness=stranded)
 
@@ -96,7 +186,9 @@ def main():
 
     # Step 2.5: Extend gene coordinates
     log_message("Extending gene coordinates...")
-    genes = extend_gene_coordinates(genes, args.downstream_exon_extension) # Extend gene coordinates first
+    genes = extend_gene_coordinates(
+        genes, args.downstream_exon_extension
+    )  # Extend gene coordinates first
 
     # Step 3: Extend exons (now only extends exons, using extended gene coordinates)
     log_message("Extending terminal exons...")
@@ -120,13 +212,23 @@ def main():
 
     # Step 8: Calculate mean coverage for subsegments
     log_message("Calculating mean coverage for subsegments...")
-    coverage_results = calculate_mean_coverage(genes, args.coverage[0], args.coverage[1]) # Pass both coverage files and genes
+    coverage_results = calculate_mean_coverage(
+        genes, args.coverage[0], args.coverage[1]
+    )  # Pass both coverage files and genes
 
     # Step 9: Write coverage results
     log_message("Writing coverage results...")
-    write_coverage_results(genes, coverage_results, output_genes_tsv, output_segments_tsv, output_subsegments_tsv) #Pass genes too
+    write_coverage_results(
+        genes,
+        coverage_results,
+        output_genes_tsv,
+        output_segments_tsv,
+        output_subsegments_tsv,
+    )  # Pass genes too
 
-    log_message("Genomic segment construction, PAS identification, subsegment construction and coverage calculation pipeline completed.")
+    log_message(
+        "Genomic segment construction, PAS identification, subsegment construction and coverage calculation pipeline completed."
+    )
 
 
 if __name__ == "__main__":

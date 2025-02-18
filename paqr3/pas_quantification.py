@@ -2,10 +2,21 @@ import argparse
 import pybedtools
 from gtfparse import read_gtf
 
+
 # Define a class to hold information about each region in the transcript
 # Add a string representation for debugging
 class Region:
-    def __init__(self, region_type, chrom, start, end, strand, exon_number=None, intron_number=None, attributes=None):
+    def __init__(
+        self,
+        region_type,
+        chrom,
+        start,
+        end,
+        strand,
+        exon_number=None,
+        intron_number=None,
+        attributes=None,
+    ):
         self.region_type = region_type  # exon or intron
         self.chrom = chrom
         self.start = start
@@ -17,7 +28,10 @@ class Region:
 
     def to_gtf_format(self):
         """Convert the Region object to a GTF format string."""
-        attr_str = "; ".join([f'{key} "{value}"' for key, value in self.attributes.items()]) + ";"
+        attr_str = (
+            "; ".join([f'{key} "{value}"' for key, value in self.attributes.items()])
+            + ";"
+        )
         return f"{self.chrom}\t{self.attributes.get('source', 'unknown')}\t{self.region_type}\t{self.start}\t{self.end}\t.\t{self.strand}\t.\t{attr_str}"
 
     def __str__(self):
@@ -26,7 +40,8 @@ class Region:
 
     def __repr__(self):
         return self.__str__()
-        
+
+
 # Define a class to hold transcript information
 class Transcript:
     def __init__(self, transcript_id, strand, attributes=None):
@@ -40,7 +55,10 @@ class Transcript:
 
     def to_gtf_format(self):
         """Convert the Transcript object to a GTF format string."""
-        attr_str = "; ".join([f'{key} "{value}"' for key, value in self.attributes.items()]) + ";"
+        attr_str = (
+            "; ".join([f'{key} "{value}"' for key, value in self.attributes.items()])
+            + ";"
+        )
         start = min(region.start for region in self.regions)
         end = max(region.end for region in self.regions)
         return f"{self.regions[0].chrom}\t{self.attributes.get('source', 'unknown')}\ttranscript\t{start}\t{end}\t.\t{self.strand}\t.\t{attr_str}"
@@ -61,16 +79,32 @@ class Gene:
 
     def to_gtf_format(self):
         """Convert the Gene object to a GTF format string."""
-        attr_str = "; ".join([f'{key} "{value}"' for key, value in self.attributes.items()]) + ";"
-        start = min(region.start for transcript in self.transcripts.values() for region in transcript.regions)
-        end = max(region.end for transcript in self.transcripts.values() for region in transcript.regions)
-        strand = next(iter(self.transcripts.values())).strand  # Use strand of the first transcript
-        chrom = next(iter(self.transcripts.values())).regions[0].chrom  # Use chrom of the first region
+        attr_str = (
+            "; ".join([f'{key} "{value}"' for key, value in self.attributes.items()])
+            + ";"
+        )
+        start = min(
+            region.start
+            for transcript in self.transcripts.values()
+            for region in transcript.regions
+        )
+        end = max(
+            region.end
+            for transcript in self.transcripts.values()
+            for region in transcript.regions
+        )
+        strand = next(
+            iter(self.transcripts.values())
+        ).strand  # Use strand of the first transcript
+        chrom = (
+            next(iter(self.transcripts.values())).regions[0].chrom
+        )  # Use chrom of the first region
         return f"{chrom}\t{self.attributes.get('source', 'unknown')}\tgene\t{start}\t{end}\t.\t{strand}\t.\t{attr_str}"
 
     def __repr__(self):
         return f"Gene: {self.gene_id}, Transcripts: {self.transcripts}"
-    
+
+
 # Function to read the GTF file and create gene and transcript objects with exon regions
 def read_gtf_file(gtf_file):
     # Read GTF file into a pandas dataframe
@@ -94,7 +128,9 @@ def read_gtf_file(gtf_file):
 
         # Extract attributes for genes, transcripts, and exons
         gene_attributes = {key: row[key] for key in row.index if "gene" in key}
-        transcript_attributes = {key: row[key] for key in row.index if "transcript" in key}
+        transcript_attributes = {
+            key: row[key] for key in row.index if "transcript" in key
+        }
         exon_attributes = {key: row[key] for key in row.index if "exon" in key}
         exon_attributes.update(gene_attributes)
         exon_attributes.update(transcript_attributes)
@@ -112,10 +148,13 @@ def read_gtf_file(gtf_file):
             transcript = gene.transcripts[transcript_id]
 
         # Create the exon region and add to the transcript
-        exon_region = Region("exon", chrom, start, end, strand, exon_number, attributes=exon_attributes)
+        exon_region = Region(
+            "exon", chrom, start, end, strand, exon_number, attributes=exon_attributes
+        )
         transcript.add_region(exon_region)
 
     return genes
+
 
 def add_intronic_regions(genes):
     """
@@ -152,7 +191,10 @@ def add_intronic_regions(genes):
                             end=intron_end,
                             strand=region.strand,
                             intron_number=intron_count,
-                            attributes={"gene_id": gene.gene_id, "transcript_id": transcript.transcript_id}
+                            attributes={
+                                "gene_id": gene.gene_id,
+                                "transcript_id": transcript.transcript_id,
+                            },
                         )
                         reconstructed_regions.append(intron_region)
 
@@ -160,6 +202,7 @@ def add_intronic_regions(genes):
             transcript.regions = reconstructed_regions
 
     return genes
+
 
 def construct_contiguous_regions(genes):
     """
@@ -177,7 +220,9 @@ def construct_contiguous_regions(genes):
         for transcript in gene.transcripts.values():
             for region in transcript.regions:
                 boundaries.add(region.start)
-                boundaries.add(region.end + 1)  # Ensure the end is exclusive for the next region
+                boundaries.add(
+                    region.end + 1
+                )  # Ensure the end is exclusive for the next region
 
         # Sort boundaries
         sorted_boundaries = sorted(boundaries)
@@ -199,10 +244,14 @@ def construct_contiguous_regions(genes):
             # Create a Region object for each new region
             new_region = Region(
                 region_type="gene_fragment",
-                chrom=gene.transcripts[next(iter(gene.transcripts))].regions[0].chrom,  # Use chrom of the first transcript
+                chrom=gene.transcripts[next(iter(gene.transcripts))]
+                .regions[0]
+                .chrom,  # Use chrom of the first transcript
                 start=start,
                 end=end,
-                strand=gene.transcripts[next(iter(gene.transcripts))].strand,  # Use strand of the first transcript
+                strand=gene.transcripts[
+                    next(iter(gene.transcripts))
+                ].strand,  # Use strand of the first transcript
                 attributes={"gene_id": gene.gene_id, "region_id": i},
             )
             gene_regions.append(new_region)
@@ -213,6 +262,7 @@ def construct_contiguous_regions(genes):
 
     return genes
 
+
 # Add a function to write the regions to a GTF file
 def write_regions_to_gtf(genes, output_file):
     """
@@ -222,10 +272,10 @@ def write_regions_to_gtf(genes, output_file):
         genes (dict): A dictionary of Gene objects with constructed regions.
         output_file (str): Path to the output GTF file.
     """
-    with open(output_file, 'w') as f:
+    with open(output_file, "w") as f:
         for gene in genes.values():
             # Write gene-level GTF entry
-            f.write(gene.to_gtf_format() + '\n')
+            f.write(gene.to_gtf_format() + "\n")
 
             # Write region-level GTF entries
             unique_regions = set()  # Ensure no duplicate regions
@@ -234,7 +284,7 @@ def write_regions_to_gtf(genes, output_file):
                     region_key = (region.chrom, region.start, region.end, region.strand)
                     if region_key not in unique_regions:
                         unique_regions.add(region_key)
-                        f.write(region.to_gtf_format() + '\n')
+                        f.write(region.to_gtf_format() + "\n")
 
     print(f"Regions written to {output_file}")
 
@@ -262,25 +312,31 @@ def filter_regions_with_pas_and_track_overlaps(genes, pas_bed_file):
 
             for i, region in enumerate(regions):
                 # Skip first region (positive strand) or last region (negative strand)
-                if (transcript.strand == "+" and i == 0) or (transcript.strand == "-" and i == len(regions) - 1):
+                if (transcript.strand == "+" and i == 0) or (
+                    transcript.strand == "-" and i == len(regions) - 1
+                ):
                     continue
 
                 # Convert region to a BedTool-compatible format
-                region_bed = pybedtools.create_interval_from_list([
-                    region.chrom,
-                    str(region.start - 1),  # BED is 0-based
-                    str(region.end),       # BED is 1-based
-                    region.attributes["region_id"],
-                    "0",                   # Dummy score
-                    region.strand
-                ])
+                region_bed = pybedtools.create_interval_from_list(
+                    [
+                        region.chrom,
+                        str(region.start - 1),  # BED is 0-based
+                        str(region.end),  # BED is 1-based
+                        region.attributes["region_id"],
+                        "0",  # Dummy score
+                        region.strand,
+                    ]
+                )
 
                 # Check for overlaps with PAS
                 overlaps = pas_bed.intersect(pybedtools.BedTool([region_bed]), wa=True)
 
                 valid_pas_ids = set()  # Use a set to avoid duplicate PAS IDs
                 for pas_interval in overlaps:
-                    pas_start = pas_interval.start + 1  # BED interval is 0-based, GTF is 1-based
+                    pas_start = (
+                        pas_interval.start + 1
+                    )  # BED interval is 0-based, GTF is 1-based
                     pas_end = pas_interval.end
                     pas_id = pas_interval[3]  # 4th column of the BED file
 
@@ -296,38 +352,35 @@ def filter_regions_with_pas_and_track_overlaps(genes, pas_bed_file):
 
     return region_pas_map
 
+
 # Add an argument parser for the script
 def main():
-    parser = argparse.ArgumentParser(description="Quantify PAS usage from RNA-Seq alignments.")
-    parser.add_argument(
-        "--annotation",
-        type=str,
-        required=True,
-        help="Path to the annotation GTF file."
+    parser = argparse.ArgumentParser(
+        description="Quantify PAS usage from RNA-Seq alignments."
     )
     parser.add_argument(
-        "--pas_atlas",
-        type=str,
-        required=True,
-        help="Path to the PAS atlas BED file."
+        "--annotation", type=str, required=True, help="Path to the annotation GTF file."
+    )
+    parser.add_argument(
+        "--pas_atlas", type=str, required=True, help="Path to the PAS atlas BED file."
     )
     parser.add_argument(
         "--coverage",
         type=str,
         required=False,
-        help="Path to the RNA-Seq coverage file (e.g., from samtools coverage)."
+        help="Path to the RNA-Seq coverage file (e.g., from samtools coverage).",
     )
     parser.add_argument(
         "--output_regions",
         type=str,
         required=True,
-        help="Path to the output GTF file for regions."
+        help="Path to the output GTF file for regions.",
     )
     parser.add_argument(
         "--output_pas_usage",
         type=str,
         required=False,
-        help="Path to the output file for PAS usage (optional)."
+        help="Path to the output file for PAS usage (optional).",
     )
 
     args = parser.parse_args()
@@ -340,7 +393,9 @@ def main():
 
     # Step 2: Filter regions based on PAS overlaps
     print("Filtering regions with PAS overlaps...")
-    region_pas_map = filter_regions_with_pas_and_track_overlaps(genes_with_regions, args.pas_atlas)
+    region_pas_map = filter_regions_with_pas_and_track_overlaps(
+        genes_with_regions, args.pas_atlas
+    )
 
     # Step 3: Write regions to GTF for visualization
     print("Writing regions to output GTF...")
@@ -352,7 +407,7 @@ def main():
         usage_results = calculate_usage(region_pas_map, args.coverage)
         if args.output_pas_usage:
             print(f"Writing PAS usage results to {args.output_pas_usage}...")
-            with open(args.output_pas_usage, 'w') as f:
+            with open(args.output_pas_usage, "w") as f:
                 for region, metrics in usage_results.items():
                     f.write(f"{region}: {metrics}\n")
 
@@ -360,6 +415,7 @@ def main():
         print("Sample PAS usage results:")
         for region, metrics in list(usage_results.items())[:5]:
             print(f"{region}: {metrics}")
+
 
 if __name__ == "__main__":
     main()
