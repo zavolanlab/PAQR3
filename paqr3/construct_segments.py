@@ -5,44 +5,69 @@ def log_message(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
 
-def extend_exon_downstream(genes, downstream_exon_extension=200):
-    """Extends terminal exons per transcript, updating gene coordinates."""
+def extend_gene_coordinates(genes, gene_extension_length=200):
+    """Extends gene coordinates (simplified and robust - FIXED MIN/MAX)."""
 
-    log_message(f"Extending terminal exons ({downstream_exon_extension} bp)...")
+    log_message(f"Extending gene coordinates ({gene_extension_length} bp)...")
 
-    for gene in genes.values():
-        # Find the longest transcript for boundary checks (using max exon end)
-        longest_transcript_end = float('-inf')
-        for transcript in gene.transcripts.values():
-            if transcript.regions:
-                terminal_exon = max(transcript.regions, key=lambda r: r.end if r.region_type == "exon" else -1)
-                longest_transcript_end = max(longest_transcript_end, terminal_exon.end)
+    sorted_genes = sorted(genes.values(), key=lambda g: (next((r.chrom for t in g.transcripts.values() for r in t.regions), None), min(list(r.start for t in g.transcripts.values() for r in t.regions)) if g.transcripts else float('inf')))
 
-        for transcript in gene.transcripts.values():
-            if transcript.regions:
-                terminal_exon = max(transcript.regions, key=lambda r: r.end if r.region_type == "exon" else -1)
+    for i, gene in enumerate(sorted_genes):
+        gene_strand = next((t.strand for t in gene.transcripts.values()), None)
+        if gene_strand is None:
+            continue
 
-                if terminal_exon.strand == "+":
-                    extended_end = terminal_exon.end + downstream_exon_extension
-                    extended_end = min(extended_end, longest_transcript_end)  # Boundary check
-                    terminal_exon.end = extended_end
-                elif terminal_exon.strand == "-":
-                    extended_start = terminal_exon.start - downstream_exon_extension
-                    extended_start = max(extended_start, longest_transcript_end)  # Boundary check
-                    terminal_exon.start = extended_start
+        gene_start = min(list(r.start for t in gene.transcripts.values() for r in t.regions)) if gene.transcripts else float('inf')
+        gene_end = max(list(r.end for t in gene.transcripts.values() for r in t.regions)) if gene.transcripts else float('-inf')
 
-        # Update gene coordinates based on the *extended* transcripts
-        gene_start = min(r.start for t in gene.transcripts.values() for r in t.regions) if gene.transcripts else float('inf')
-        gene_end = max(r.end for t in gene.transcripts.values() for r in t.regions) if gene.transcripts else float('-inf')
-        for t in gene.transcripts.values():
-            for r in t.regions:
-                r.attributes["gene_id"] = gene.gene_id
-                r.attributes["transcript_id"] = t.transcript_id
+        if gene_strand == "+":
+            potential_end = gene_end + gene_extension_length
+            next_gene_start = potential_end
+
+            for other_gene in sorted_genes[i+1:]:
+                if next((r.chrom for t in other_gene.transcripts.values() for r in t.regions), None) == next((r.chrom for t in gene.transcripts.values() for r in t.regions), None) and min(list(r.start for t in other_gene.transcripts.values() for r in t.regions)) > gene_end:
+                    next_gene_start = min(potential_end, min(list(r.start for t in other_gene.transcripts.values() for r in t.regions)) - 1)
+                    break
+
+            gene_end = min(potential_end, next_gene_start)
+
+        elif gene_strand == "-":
+            potential_start = gene_start - gene_extension_length
+            previous_gene_end = potential_start
+
+            for other_gene in reversed(sorted_genes[:i]):
+                if next((r.chrom for t in other_gene.transcripts.values() for r in t.regions), None) == next((r.chrom for t in gene.transcripts.values() for r in t.regions), None) and max(list(r.end for t in other_gene.transcripts.values() for r in t.regions)) < gene_start:
+                    previous_gene_end = max(potential_start, max(list(r.end for t in other_gene.transcripts.values() for r in t.regions)) + 1)
+                    break
+
+            gene_start = max(potential_start, previous_gene_end)
+
         gene.attributes["start"] = gene_start
         gene.attributes["end"] = gene_end
 
     return genes
 
+
+def extend_exon_downstream(genes, downstream_exon_extension=200):
+    """Extends terminal exons, using pre-extended gene coordinates."""
+
+    log_message(f"Extending terminal exons ({downstream_exon_extension} bp)...")
+
+    for gene in genes.values():
+        gene_strand = next((t.strand for t in gene.transcripts.values()), None)
+        if gene_strand is None:
+            continue
+
+        for transcript in gene.transcripts.values():
+            if transcript.regions:
+                terminal_exon = max(transcript.regions, key=lambda r: r.end if r.region_type == "exon" and r.strand == "+" else r.start if r.region_type == "exon" and r.strand == "-" else -1)
+
+                if terminal_exon.strand == "+":
+                    terminal_exon.end = min(terminal_exon.end + downstream_exon_extension, gene.attributes["end"])  # Cap at extended gene end
+                elif terminal_exon.strand == "-":
+                    terminal_exon.start = max(terminal_exon.start - downstream_exon_extension, gene.attributes["start"])  # Cap at extended gene start
+
+    return genes
 
 
 def define_exons_introns(genes):
@@ -80,57 +105,79 @@ def define_exons_introns(genes):
 
 
 def construct_segments(genes):
-    """Constructs segments based on all transcripts of a gene."""
+    """Constructs segments (efficiently avoids segments from terminal exon extensions - TAGGING - CORRECTED)."""
 
     for gene in genes.values():
-        # Get strand from any of the transcripts (assuming all transcripts of a gene are on the same strand)
-        strand = next((t.strand for t in gene.transcripts.values()), None) # Handle the case where there are no transcripts
-        if strand is None: # If there are no transcripts, skip this gene
+        strand = next((t.strand for t in gene.transcripts.values()), None)
+        if strand is None:
             continue
 
         all_regions = []
+        terminal_exon_starts = set()
+        terminal_exon_ends = set()
+
         for transcript in gene.transcripts.values():
-            for region in transcript.regions:  # Use the regions AFTER extension!
+            for region in transcript.regions:
                 all_regions.append((region.start, region.end, region))
+                if region.region_type == "exon":
+                    is_terminal = (region.strand == "+" and region.end == max(r.end for r in transcript.regions if r.region_type == "exon")) or \
+                                  (region.strand == "-" and region.start == min(r.start for r in transcript.regions if r.region_type == "exon"))
+                    if is_terminal:
+                        if region.strand == "+":
+                            terminal_exon_ends.add(region.end)
+                        else:
+                            terminal_exon_starts.add(region.start)
 
-        all_regions.sort(key=lambda x: (x[0], x[1])) 
+        all_regions.sort(key=lambda x: (x[0], x[1]))
 
-        segment_boundaries = sorted(list(set([r[0] for r in all_regions] + [r[1] + 1 for r in all_regions])))
+        segment_boundaries = []
+        for start, end, _ in all_regions:
+            segment_boundaries.append(start)  # Add ALL starts
+            segment_boundaries.append(end + 1)  # Add ALL ends + 1
+
+        segment_boundaries = sorted(list(set(segment_boundaries) - terminal_exon_ends - terminal_exon_starts)) #Remove terminal exon ends and starts
 
         segments = []
         for i in range(len(segment_boundaries) - 1):
             start = segment_boundaries[i]
             end = segment_boundaries[i + 1] - 1
-            if start <= end:  # Only create if it's a valid segment
+
+            if start <= end:
                 segments.append(
                     Region(
                         region_type="segment",
-                        chrom=all_regions[0][2].chrom,  # Use chromosome from any region
+                        chrom=all_regions[0][2].chrom,
                         start=start,
                         end=end,
-                        strand=strand,  # Use strand from transcript
-                        attributes={"gene_id": gene.gene_id},
+                        strand=strand,
+                        attributes={"gene_id": gene.gene_id, "segment_strand": strand},
                     )
                 )
 
-        if strand == "-":  # Use the strand variable
-            segments.reverse()  # Reverse for negative strand
+        if strand == "-":
+            segments.reverse()
 
         for i, segment in enumerate(segments):
             segment.attributes["segment_number"] = i + 1
 
-        gene.segments = segments  # Add segments to gene object
+        gene.segments = segments
 
     return genes
 
 
 def write_segments_to_gtf(genes, output_file):
-    """Writes genes and segments to a GTF file."""
+    """Writes genes and segments to a sorted GTF file (including segment strand)."""
+
+    gtf_lines = []
+
+    for gene in genes.values():
+        for segment in gene.segments:
+            gtf_lines.append(segment.to_gtf_format() + f'\tsegment_strand "{segment.attributes["segment_strand"]}";')
+
+    gtf_lines.sort(key=lambda x: (x.split('\t')[0], int(x.split('\t')[3])))
 
     with open(output_file, "w") as f:
-        for gene in genes.values():
-            f.write(gene.to_gtf_format() + "\n")  # Write gene information
-            for segment in gene.segments:
-                f.write(segment.to_gtf_format() + "\n")  # Write segment information
+        for line in gtf_lines:
+            f.write(line + "\n")
 
     log_message(f"Genes and segments written to {output_file}")

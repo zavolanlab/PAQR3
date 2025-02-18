@@ -2,7 +2,7 @@ import argparse
 from datetime import datetime
 from paqr3.version import __version__
 from paqr3.filter_annotation import filter_annotation_by_gene_type, resolve_gene_overlaps
-from paqr3.construct_segments import extend_exon_downstream, define_exons_introns, construct_segments
+from paqr3.construct_segments import extend_gene_coordinates, extend_exon_downstream, define_exons_introns, construct_segments
 from paqr3.detect_pas import identify_pas_in_segments, write_segments_pas_to_gtf
 from paqr3.calculate_mean_coverage import calculate_mean_coverage, write_coverage_results
 from paqr3.models import Gene, Transcript, Region
@@ -48,13 +48,13 @@ def parse_gtf_to_genes(gtf_data):
 
 def main():
     parser = argparse.ArgumentParser(description="Filter and construct genomic segments from RNA-Seq annotations.")
-    parser.add_argument("--annotation", type=str, required=True, help="Path to the annotation GTF file.")
+    parser.add_argument("--annotation", "-a", type=str, required=True, help="Path to the annotation GTF file.")
     parser.add_argument("--strandedness", type=str, default="true", choices=["true", "false"], help="Whether the data is stranded (true) or unstranded (false).")
     parser.add_argument("--downstream_exon_extension", type=int, default=200, help="Number of bases to extend terminal exons.")
-    parser.add_argument("--pas_atlas", type=str, required=True, help="Path to the PAS atlas BED file.")
-    parser.add_argument("--output_regions", type=str, required=True, help="Path to the output GTF file for regions and segments.")
-    parser.add_argument("--coverage", type=str, required=True, help="Path to the coverage BED file.")
-    parser.add_argument("--output_coverage", type=str, required=True, help="Path to output TSV file for coverage results.")
+    parser.add_argument("--pas_atlas", "-pa", type=str, required=True, help="Path to the PAS atlas BED file.")
+    parser.add_argument("--output_regions", "-or", type=str, required=True, help="Path to the output GTF file for regions and segments.")
+    parser.add_argument("--coverage", "-c", type=str, required=True, help="Path to the coverage BED file.")
+    parser.add_argument("--output_coverage", "-oc", type=str, required=True, help="Path to output TSV file for coverage results.")
     parser.add_argument(
         "--version",
         "-v",
@@ -78,7 +78,11 @@ def main():
     log_message("Parsing GTF to Gene/Transcript/Region objects...")
     genes = parse_gtf_to_genes(filtered_gtf)
 
-    # Step 3: Extend exons
+    # Step 2.5: Extend gene coordinates
+    log_message("Extending gene coordinates...")
+    genes = extend_gene_coordinates(genes, args.downstream_exon_extension) # Extend gene coordinates first
+
+    # Step 3: Extend exons (now only extends exons, using extended gene coordinates)
     log_message("Extending terminal exons...")
     genes = extend_exon_downstream(genes, args.downstream_exon_extension)
 
