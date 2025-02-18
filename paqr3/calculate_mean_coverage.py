@@ -7,92 +7,110 @@ def log_message(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
 
-def calculate_mean_coverage(genes, coverage_bw):
-    """Calculates mean squared coverage for PAS sites using bigWig (corrected bounds)."""
+def calculate_mean_coverage(genes, coverage_bw_pos, coverage_bw_neg): #Added genes parameter
+    """Calculates mean coverage for subsegments using bigWig."""
 
-    log_message("Calculating mean squared coverage for PAS sites (using bigWig)...")
+    log_message("Calculating mean coverage for subsegments (using bigWig)...")
 
-    bw = pyBigWig.open(coverage_bw)
+    bw_pos = pyBigWig.open(coverage_bw_pos)
+    bw_neg = pyBigWig.open(coverage_bw_neg)
 
     results = []
 
     for gene in genes.values():
         for segment in gene.segments:
-            if "overlapping_pas" in segment.attributes:
-                pas_ids = segment.attributes["overlapping_pas"]
+            if hasattr(segment, "subsegments"):
+                for subsegment in segment.subsegments:
+                    subsegment_start = subsegment.start
+                    subsegment_end = subsegment.end
+                    subsegment_strand = subsegment.strand
 
-                for pas_id in pas_ids:
-                    pas_info = pas_id.split(":")
-                    pas_chrom = pas_info[0]
-                    pas_pos = int(pas_info[1])
-                    pas_strand = pas_info[2]
-
-                    segment_start = segment.start
-                    segment_end = segment.end
-
-                    if pas_strand == "+":
-                        upstream_start = segment_start
-                        upstream_end = pas_pos
-                        downstream_start = pas_pos + 1  # Corrected downstream start
-                        downstream_end = segment_end
-                    elif pas_strand == "-":
-                        upstream_start = pas_pos
-                        upstream_end = segment_end
-                        downstream_start = segment_start
-                        downstream_end = pas_pos - 1 # Corrected downstream end
-
-                    # Ensure valid intervals (start < end)
-                    if upstream_start < upstream_end:
-                        try:
-                            upstream_coverage = bw.values(pas_chrom, upstream_start, upstream_end, numpy=True)
-                        except ValueError:  # Chromosome not in bigWig or invalid interval
-                            upstream_coverage = np.array([])
+                    if subsegment_strand == "+":
+                        bw = bw_pos
+                    elif subsegment_strand == "-":
+                        bw = bw_neg
                     else:
-                        upstream_coverage = np.array([])
+                        raise ValueError(f"Invalid strand: {subsegment_strand}")
 
-                    if downstream_start < downstream_end: # Check for correct interval bounds
+                    if subsegment_start < subsegment_end:
                         try:
-                            downstream_coverage = bw.values(pas_chrom, downstream_start, downstream_end, numpy=True)
-                        except ValueError:  # Chromosome not in bigWig or invalid interval
-                            downstream_coverage = np.array([])
+                            coverage = bw.values(subsegment.chrom, subsegment_start, subsegment_end, numpy=True)
+                        except ValueError:
+                            coverage = np.array([])
                     else:
-                        downstream_coverage = np.array([])
+                        coverage = np.array([])
 
-                    upstream_mean = np.nanmean(upstream_coverage) if len(upstream_coverage) > 0 else 0  # Use nanmean to ignore NAs
-                    downstream_mean = np.nanmean(downstream_coverage) if len(downstream_coverage) > 0 else 0
-
-                    upstream_mean_sq = upstream_mean**2
-                    downstream_mean_sq = downstream_mean**2
+                    mean_coverage = np.nanmean(coverage) if len(coverage) > 0 else 0
 
                     results.append(
                         [
                             gene.gene_id,
-                            pas_id,
                             segment.attributes["segment_number"],
-                            f"{segment.chrom}:{segment.start}-{segment.end}:{segment.strand}",
-                            upstream_mean_sq,
-                            downstream_mean_sq,
+                            subsegment.attributes["subsegment_number"],
+                            f"{subsegment.chrom}:{subsegment.start}-{subsegment.end}:{subsegment.strand}",
+                            mean_coverage,
                         ]
                     )
 
-    bw.close()
+    bw_pos.close()
+    bw_neg.close()
 
     results_df = pd.DataFrame(
         results,
         columns=[
             "gene_id",
-            "pas_id",
             "segment_number",
-            "segment_coordinates",
-            "upstream_mean_sq_coverage",
-            "downstream_mean_sq_coverage",
+            "subsegment_number",
+            "subsegment_coordinates",
+            "mean_coverage",
         ],
     )
 
     return results_df
 
 
-def write_coverage_results(results_df, output_file):
-    """Writes the coverage results to a TSV file."""
-    results_df.to_csv(output_file, sep="\t", index=False)
-    log_message(f"Coverage results written to {output_file}")
+def write_coverage_results(genes, results_df, output_genes_tsv, output_segments_tsv, output_subsegments_tsv): #Added genes parameter
+    """Writes the coverage results to TSV files."""
+
+    if results_df.empty:  # Check if DataFrame is empty
+        genes_df = pd.DataFrame(columns=["unique_gene_id", "gene_id", "gene_name", "chrom", "start", "end"])
+        segments_df = pd.DataFrame(columns=["gene_unique_id", "segment_number", "segment_coordinates"])
+        subsegments_df = pd.DataFrame(columns=["gene_unique_id", "segment_number", "subsegment_number", "subsegment_coordinates", "mean_coverage"])
+    else:
+        # Create unique gene IDs and DataFrames
+        gene_mapping = {}
+        unique_gene_id_counter = 1
+        genes_data = []
+        segments_data = []
+        subsegments_data = []
+
+        for _, row in results_df.iterrows():
+            gene_id = row["gene_id"]
+            if gene_id not in gene_mapping:
+                gene_mapping[gene_id] = unique_gene_id_counter
+                unique_gene_id_counter += 1
+
+            unique_gene_id = gene_mapping[gene_id]
+
+            gene = next((g for g in genes.values() if g.gene_id == gene_id), None)
+            if gene:
+                # Get chromosome from the first transcript's first region (assuming all transcripts are on the same chromosome)
+                first_transcript = next(iter(gene.transcripts.values()), None)
+                chrom = first_transcript.regions[0].chrom if first_transcript and first_transcript.regions else ""
+
+                genes_data.append([unique_gene_id, gene_id, gene.attributes.get("gene_name", ""), chrom, min(list(r.start for t in gene.transcripts.values() for r in t.regions)), max(list(r.end for t in gene.transcripts.values() for r in t.regions))])  # Corrected: Added chrom
+            else:
+                genes_data.append([unique_gene_id, gene_id, "", "", "", ""])
+
+            segments_data.append([unique_gene_id, row["segment_number"], row["subsegment_coordinates"].rsplit(":", 1)[0]])
+            subsegments_data.append([unique_gene_id, row["segment_number"], row["subsegment_number"], row["subsegment_coordinates"], row["mean_coverage"]])
+
+        genes_df = pd.DataFrame(genes_data, columns=["unique_gene_id", "gene_id", "gene_name", "chrom", "start", "end"])
+        segments_df = pd.DataFrame(segments_data, columns=["gene_unique_id", "segment_number", "segment_coordinates"])
+        subsegments_df = pd.DataFrame(subsegments_data, columns=["gene_unique_id", "segment_number", "subsegment_number", "subsegment_coordinates", "mean_coverage"])
+
+    genes_df.to_csv(output_genes_tsv, sep="\t", index=False)
+    segments_df.to_csv(output_segments_tsv, sep="\t", index=False)
+    subsegments_df.to_csv(output_subsegments_tsv, sep="\t", index=False)
+
+    log_message(f"Coverage results written to {output_genes_tsv}, {output_segments_tsv}, and {output_subsegments_tsv}")

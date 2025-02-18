@@ -105,7 +105,7 @@ def define_exons_introns(genes):
 
 
 def construct_segments(genes):
-    """Constructs segments (efficiently avoids segments from terminal exon extensions - TAGGING - CORRECTED)."""
+    """Constructs segments (correctly handles multiple transcripts and terminal exons)."""
 
     for gene in genes.values():
         strand = next((t.strand for t in gene.transcripts.values()), None)
@@ -130,12 +130,18 @@ def construct_segments(genes):
 
         all_regions.sort(key=lambda x: (x[0], x[1]))
 
-        segment_boundaries = []
-        for start, end, _ in all_regions:
-            segment_boundaries.append(start)  # Add ALL starts
-            segment_boundaries.append(end + 1)  # Add ALL ends + 1
+        segment_boundaries = set()  # Use a set for efficient boundary management
 
-        segment_boundaries = sorted(list(set(segment_boundaries) - terminal_exon_ends - terminal_exon_starts)) #Remove terminal exon ends and starts
+        for start, end, _ in all_regions:
+            segment_boundaries.add(start)
+            segment_boundaries.add(end + 1)
+
+        # Remove boundaries that are ONLY terminal exon starts/ends
+        segment_boundaries -= terminal_exon_ends
+        segment_boundaries -= terminal_exon_starts
+
+
+        segment_boundaries = sorted(list(segment_boundaries))
 
         segments = []
         for i in range(len(segment_boundaries) - 1):
@@ -163,21 +169,3 @@ def construct_segments(genes):
         gene.segments = segments
 
     return genes
-
-
-def write_segments_to_gtf(genes, output_file):
-    """Writes genes and segments to a sorted GTF file (including segment strand)."""
-
-    gtf_lines = []
-
-    for gene in genes.values():
-        for segment in gene.segments:
-            gtf_lines.append(segment.to_gtf_format() + f'\tsegment_strand "{segment.attributes["segment_strand"]}";')
-
-    gtf_lines.sort(key=lambda x: (x.split('\t')[0], int(x.split('\t')[3])))
-
-    with open(output_file, "w") as f:
-        for line in gtf_lines:
-            f.write(line + "\n")
-
-    log_message(f"Genes and segments written to {output_file}")

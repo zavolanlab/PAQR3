@@ -1,30 +1,29 @@
 from datetime import datetime
 from pybedtools import BedTool
 from intervaltree import Interval, IntervalTree
-
+from paqr3.models import Region
 
 def log_message(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
 
-
-def identify_pas_in_segments(genes, pas_atlas_bed, strandedness=True):
-    """Identifies PAS sites overlapping with segments using an interval tree."""
+def identify_pas_in_segments(genes, pas_atlas_bed):
+    """Identifies PAS sites overlapping with segments and constructs subsegments."""
 
     log_message("Reading PAS atlas...")
     pas_bed = BedTool(pas_atlas_bed)
 
     log_message("Building PAS interval tree...")
-    pas_trees = {}  # Dictionary to store interval trees per chromosome and strand
+    pas_trees = {}
 
     for pas in pas_bed:
         chrom = pas.chrom
-        strand = pas.strand if strandedness else "+" # Use dummy strand if unstranded
+        strand = pas.strand
         if (chrom, strand) not in pas_trees:
             pas_trees[(chrom, strand)] = IntervalTree()
         pas_trees[(chrom, strand)].add(Interval(int(pas.start), int(pas.end), pas.fields))
 
-    log_message("Identifying PAS overlaps with segments...")
+    log_message("Identifying PAS overlaps with segments and constructing subsegments...")
 
     for gene in genes.values():
         for segment in gene.segments:
@@ -34,26 +33,69 @@ def identify_pas_in_segments(genes, pas_atlas_bed, strandedness=True):
             segment_end = segment.end
 
             overlapping_pas = []
+            subsegments = []
             if (chrom, strand) in pas_trees:
-                for interval in pas_trees[(chrom, strand)][segment_start:segment_end]:
-                    pas_start, pas_end, pas_fields = interval.begin, interval.end, interval.data
-                    pas_id = pas_fields[3] # Assuming PAS ID is in the 4th field
+                overlapping_intervals = pas_trees[(chrom, strand)][segment_start:segment_end]
+                sorted_intervals = sorted(overlapping_intervals, key=lambda x: x.begin)  # Sort by start position
 
-                    # Check for boundary overlaps (same as before)
-                    if (int(segment_start) < int(pas_start) < int(segment_end)) or (int(segment_start) < int(pas_end) < int(segment_end)):
-                        overlapping_pas.append(pas_id)
+                current_subsegment_start = segment_start
+
+                for interval in sorted_intervals:
+                    pas_start, pas_end, pas_fields = interval.begin, interval.end, interval.data
+                    pas_id = pas_fields[3]
+
+                    # Create subsegment up to PAS start
+                    if pas_start > current_subsegment_start:
+                        subsegments.append(
+                            Region(
+                                region_type="subsegment",
+                                chrom=chrom,
+                                start=current_subsegment_start,
+                                end=pas_start - 1,
+                                strand=strand,
+                                attributes={"gene_id": gene.gene_id, "segment_id": segment.attributes["segment_number"], "subsegment_number": len(subsegments) + 1, "strand": strand}, #Added strand
+                            )
+                        )
+
+                    # Create subsegment for PAS region
+                    subsegments.append(
+                        Region(
+                            region_type="subsegment",
+                            chrom=chrom,
+                            start=pas_start,
+                            end=pas_end,
+                            strand=strand,
+                            attributes={"gene_id": gene.gene_id, "segment_id": segment.attributes["segment_number"], "subsegment_number": len(subsegments) + 1, "strand": strand}, #Added strand
+                        )
+                    )
+
+                    current_subsegment_start = pas_end + 1  # Start next subsegment after PAS end
+                    overlapping_pas.append(pas_id)
+
+                # Create any remaining subsegment after the last PAS
+                if current_subsegment_start <= segment_end:
+                    subsegments.append(
+                        Region(
+                            region_type="subsegment",
+                            chrom=chrom,
+                            start=current_subsegment_start,
+                            end=segment_end,
+                            strand=strand,
+                            attributes={"gene_id": gene.gene_id, "segment_id": segment.attributes["segment_number"], "subsegment_number": len(subsegments) + 1, "strand": strand}, #Added strand
+                        )
+                    )
 
             segment.attributes["overlapping_pas"] = overlapping_pas
+            segment.subsegments = subsegments  # Add subsegments to the segment
 
     return genes
 
 
 def write_segments_pas_to_gtf(genes, output_file):
-    """Writes genes, segments and overlapping PAS to a GTF file."""
+    """Writes genes, segments and subsegments to a GTF file."""
 
     with open(output_file, "w") as f:
         for gene in genes.values():
-            f.write(gene.to_gtf_format() + "\n")
             for segment in gene.segments:
                 segment_line = segment.to_gtf_format()
                 if "overlapping_pas" in segment.attributes:
@@ -61,4 +103,10 @@ def write_segments_pas_to_gtf(genes, output_file):
                     segment_line = segment_line.replace(";", f'; overlapping_pas "{pas_list}";')
                 f.write(segment_line + "\n")
 
-    log_message(f"Genes, segments and overlapping PAS written to {output_file}")
+                if hasattr(segment, "subsegments"):  # Check if subsegments exist
+                    for subsegment in segment.subsegments:
+                        subsegment_line = subsegment.to_gtf_format()  # Get the basic GTF format
+                        subsegment_line = subsegment_line.replace("\tsegment\t", "\tsubsegment\t") #Change the feature to "subsegment"
+                        f.write(subsegment_line + "\n")  # Write subsegments
+
+    log_message(f"Genes, segments and subsegments written to {output_file}")
