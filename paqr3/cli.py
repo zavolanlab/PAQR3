@@ -12,7 +12,10 @@ from paqr3.construct_segments import (
     define_exons_introns,
     construct_segments,
 )
-from paqr3.detect_pas import identify_pas_in_segments, write_segments_pas_to_gtf
+from paqr3.detect_pas import (
+    identify_pas_in_segments,
+    write_segments_pas_to_gtf,
+)
 from paqr3.calculate_mean_coverage import (
     calculate_mean_coverage,
     write_coverage_results,
@@ -70,7 +73,9 @@ def parse_gtf_to_genes(gtf_data):
 
             if gene_id in genes:
                 transcript = Transcript(
-                    transcript_id, row["strand"], attributes=transcript_attributes
+                    transcript_id,
+                    row["strand"],
+                    attributes=transcript_attributes,
                 )
                 genes[gene_id].add_transcript(transcript)
         elif row["feature"] == "exon":
@@ -92,7 +97,10 @@ def parse_gtf_to_genes(gtf_data):
                     "transcript_id",
                 ]
             }
-            if gene_id in genes and transcript_id in genes[gene_id].transcripts:
+            if (
+                gene_id in genes
+                and transcript_id in genes[gene_id].transcripts
+            ):
                 exon = Region(
                     region_type="exon",
                     chrom=row["seqname"],
@@ -171,8 +179,12 @@ def main():
 
     output_gtf = os.path.join(output_dir, f"{sample_name}.gtf")
     output_genes_tsv = os.path.join(output_dir, f"{sample_name}_genes.tsv")
-    output_segments_tsv = os.path.join(output_dir, f"{sample_name}_segments.tsv")
-    output_subsegments_tsv = os.path.join(output_dir, f"{sample_name}_subsegments.tsv")
+    output_segments_tsv = os.path.join(
+        output_dir, f"{sample_name}_segments.tsv"
+    )
+    output_subsegments_tsv = os.path.join(
+        output_dir, f"{sample_name}_subsegments.tsv"
+    )
 
     # Step 1: Filter annotation
     filtered_gtf = filter_annotation_by_gene_type(args.annotation)
@@ -203,7 +215,9 @@ def main():
     genes = construct_segments(genes)
 
     # Step 6: Identify PAS in segments and construct subsegments
-    log_message("Identifying PAS sites in segments and constructing subsegments...")
+    log_message(
+        "Identifying PAS sites in segments and constructing subsegments..."
+    )
     genes = identify_pas_in_segments(genes, args.pas_atlas)
 
     # Step 7: Write to GTF (including segments and subsegments)
