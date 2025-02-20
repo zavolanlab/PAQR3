@@ -8,7 +8,7 @@ def log_message(message):
 
 
 def extend_gene_coordinates(genes, gene_extension_length=200):
-    """Extends gene coordinates (ignoring opposite strand genes)."""
+    """Extends gene coordinates (correctly handles negative strand)."""
 
     log_message(f"Extending gene coordinates ({gene_extension_length} bp)...")
 
@@ -166,7 +166,7 @@ def extend_gene_coordinates(genes, gene_extension_length=200):
 
 
 def extend_exon_downstream(genes, downstream_exon_extension=200):
-    """Extends terminal exons, using pre-extended gene coordinates."""
+    """Extends terminal exons (CORRECTLY handles negative strand)."""
 
     log_message(
         f"Extending terminal exons ({downstream_exon_extension} bp)..."
@@ -179,29 +179,51 @@ def extend_exon_downstream(genes, downstream_exon_extension=200):
 
         for transcript in gene.transcripts.values():
             if transcript.regions:
-                terminal_exon = max(
-                    transcript.regions,
-                    key=lambda r: (
-                        r.end
-                        if r.region_type == "exon" and r.strand == "+"
-                        else (
-                            r.start
-                            if r.region_type == "exon" and r.strand == "-"
-                            else -1
-                        )
-                    ),
-                )
 
-                if terminal_exon.strand == "+":
-                    terminal_exon.end = min(
-                        terminal_exon.end + downstream_exon_extension,
-                        gene.attributes["end"],
-                    )  # Cap at extended gene end
-                elif terminal_exon.strand == "-":
-                    terminal_exon.start = max(
-                        terminal_exon.start - downstream_exon_extension,
-                        gene.attributes["start"],
-                    )  # Cap at extended gene start
+                if (
+                    gene_strand == "+"
+                ):  # Positive strand - same logic as before
+                    terminal_exon = max(
+                        transcript.regions,
+                        key=lambda r: (
+                            r.end
+                            if r.region_type == "exon" and r.strand == "+"
+                            else (
+                                r.start
+                                if r.region_type == "exon" and r.strand == "-"
+                                else -1
+                            )
+                        ),
+                    )
+                    if terminal_exon.strand == "+":
+                        terminal_exon.end = min(
+                            terminal_exon.end + downstream_exon_extension,
+                            gene.attributes["end"],
+                        )
+                    elif terminal_exon.strand == "-":
+                        terminal_exon.start = max(
+                            terminal_exon.start - downstream_exon_extension,
+                            gene.attributes["start"],
+                        )
+
+                elif gene_strand == "-":  # Negative strand - CORRECT LOGIC
+                    terminal_exon = min(  # Find the exon with the *lowest* exon number (highest genomic coordinate)
+                        transcript.regions,
+                        key=lambda r: (
+                            r.start  # Use start for negative strand sorting
+                        ),
+                    )
+
+                    if terminal_exon.strand == "-":
+                        terminal_exon.start = max(
+                            terminal_exon.start - downstream_exon_extension,
+                            gene.attributes["start"],
+                        )  # Extend the START on the negative strand
+                    elif terminal_exon.strand == "+":
+                        terminal_exon.end = min(
+                            terminal_exon.end + downstream_exon_extension,
+                            gene.attributes["end"],
+                        )
 
     return genes
 
@@ -248,7 +270,7 @@ def define_exons_introns(genes):
 
 
 def construct_segments(genes):
-    """Constructs segments (most simplified and efficient)."""
+    """Constructs segments (correctly handles all boundaries and zero-length segments)."""
 
     for gene in genes.values():
         strand = next((t.strand for t in gene.transcripts.values()), None)
@@ -321,9 +343,6 @@ def construct_segments(genes):
 
         # Remove invalid terminal exon boundaries
         valid_segment_boundaries = set()
-        if gene.gene_id == "test_gene5":
-            print(f"Segment boundaries: {segment_boundaries}")
-            print(f"TE starts: {terminal_exons_starts}")
         for boundary in segment_boundaries:
             if strand == "+":
                 if (
@@ -343,14 +362,13 @@ def construct_segments(genes):
                     valid_segment_boundaries.add(boundary)
 
         valid_segment_boundaries = sorted(list(valid_segment_boundaries))
-        if gene.gene_id == "test_gene5":
-            print(f"Valid segment boundaries: {valid_segment_boundaries}")
         segments = []
         for i in range(len(valid_segment_boundaries) - 1):
             start = valid_segment_boundaries[i]
             end = valid_segment_boundaries[i + 1] - 1
 
-            if start <= end:
+            # Prevent zero-length segments
+            if start < end:  # Only create segments if start < end
                 segments.append(
                     Region(
                         region_type="segment",
@@ -374,7 +392,3 @@ def construct_segments(genes):
         gene.segments = segments
 
     return genes
-
-    # if gene.gene_id == "test_gene3":
-    #     print(f"Gene: {gene.gene_id}, All_regions: {all_regions}")
-    #     print(f"Gene: {gene.gene_id}, TE: {terminal_exons}")
