@@ -36,7 +36,10 @@ def filter_annotation_by_gene_type(gtf_file, gene_types=["protein_coding"]):
 
 
 def resolve_gene_overlaps(filtered_gtf, strandedness=True):
-    """Resolves gene overlaps based on strandedness, updating exon coordinates."""
+    """
+    Resolves gene overlaps based on strandedness,
+    updating exon coordinates.
+    """
 
     log_message("Resolving overlaps...")
     gene_lengths = {}

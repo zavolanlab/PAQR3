@@ -206,8 +206,9 @@ def extend_exon_downstream(genes, downstream_exon_extension=200):
                             gene.attributes["start"],
                         )
 
-                elif gene_strand == "-":  # Negative strand - CORRECT LOGIC
-                    terminal_exon = min(  # Find the exon with the *lowest* exon number (highest genomic coordinate)
+                elif gene_strand == "-":  # Negative strand
+                    # Find the exon with the lowest exon number
+                    terminal_exon = min(
                         transcript.regions,
                         key=lambda r: (
                             r.start  # Use start for negative strand sorting
@@ -270,7 +271,7 @@ def define_exons_introns(genes):
 
 
 def construct_segments(genes):
-    """Constructs segments (correctly handles all boundaries and zero-length segments)."""
+    """Constructs segments."""
 
     for gene in genes.values():
         strand = next((t.strand for t in gene.transcripts.values()), None)

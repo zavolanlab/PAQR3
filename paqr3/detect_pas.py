@@ -1,6 +1,6 @@
 from datetime import datetime
-from pybedtools import BedTool
-from intervaltree import Interval, IntervalTree
+from pybedtools import BedTool  # type: ignore
+from intervaltree import Interval, IntervalTree  # type: ignore
 from paqr3.models import Region
 
 
@@ -10,7 +10,10 @@ def log_message(message):
 
 
 def identify_pas_in_segments(genes, pas_atlas_bed):
-    """Identifies PAS sites overlapping with segments and constructs subsegments."""
+    """
+    Identifies PAS sites overlapping with segments
+    and constructs subsegments.
+    """
 
     log_message("Reading PAS atlas...")
     pas_bed = BedTool(pas_atlas_bed)
@@ -28,7 +31,8 @@ def identify_pas_in_segments(genes, pas_atlas_bed):
         )
 
     log_message(
-        "Identifying PAS overlaps with segments and constructing subsegments..."
+        "Identifying PAS overlaps with segments"
+        "and constructing subsegments..."
     )
 
     for gene in genes.values():
@@ -129,7 +133,7 @@ def identify_pas_in_segments(genes, pas_atlas_bed):
 
 
 def write_segments_pas_to_gtf(genes, output_file):
-    """Writes genes and segments to a GTF file (subsegments are not written)."""
+    """Writes genes and segments to a GTF file."""
 
     with open(output_file, "w") as f:
         for gene in genes.values():

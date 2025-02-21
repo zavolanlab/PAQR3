@@ -21,7 +21,6 @@ from paqr3.calculate_mean_coverage import (
     write_coverage_results,
 )
 from paqr3.models import Gene, Transcript, Region
-import pandas as pd
 
 
 # Utility function for timestamped messages
@@ -116,7 +115,9 @@ def parse_gtf_to_genes(gtf_data):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Filter and construct genomic segments from RNA-Seq annotations."
+        description=(
+            "Filter and construct genomic segments from RNA-Seq annotations."
+        )
     )
     parser.add_argument(
         "--annotation",
@@ -144,7 +145,10 @@ def main():
         type=str,
         required=True,
         nargs=2,
-        help="Paths to the positive and negative strand coverage bigWig files (e.g., pos.bw neg.bw).",
+        help=(
+            "Paths to the positive and negative strand coverage bigWig files"
+            "(e.g., pos.bw neg.bw)."
+        ),
     )
     parser.add_argument(
         "--output_dir",
@@ -157,7 +161,10 @@ def main():
         "--version",
         "-v",
         action="version",
-        version=f"PAQR3 v{__version__}, (c) 2025 by Zavolab (zavolab-biozentrum@unibas.ch)",
+        version=(
+            f"PAQR3 v{__version__},"
+            "(c) 2025 by Zavolab (zavolab-biozentrum@unibas.ch)"
+        ),
         help="show version information and exit",
     )
 
@@ -202,7 +209,8 @@ def main():
         genes, args.downstream_exon_extension
     )  # Extend gene coordinates first
 
-    # Step 3: Extend exons (now only extends exons, using extended gene coordinates)
+    # Step 3: Extend exons (now only extends exons,
+    # using extended gene coordinates)
     log_message("Extending terminal exons...")
     genes = extend_exon_downstream(genes, args.downstream_exon_extension)
 
@@ -241,7 +249,8 @@ def main():
     )  # Pass genes too
 
     log_message(
-        "Genomic segment construction, PAS identification, subsegment construction and coverage calculation pipeline completed."
+        "Genomic segment construction, PAS identification,"
+        "subsegment construction and coverage calculation pipeline completed."
     )
 
 
