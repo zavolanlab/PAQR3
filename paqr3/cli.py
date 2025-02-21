@@ -11,16 +11,16 @@ from paqr3.construct_segments import (
     extend_exon_downstream,
     define_exons_introns,
     construct_segments,
-)
-from paqr3.detect_pas import (
     identify_pas_in_segments,
+    write_segments_pas_to_tsv,
     write_segments_pas_to_gtf,
 )
-from paqr3.calculate_mean_coverage import (
+from paqr3.calculate_coverages import (
     calculate_mean_coverage,
     write_coverage_results,
 )
 from paqr3.models import Gene, Transcript, Region
+import pandas as pd  # type: ignore
 
 
 # Utility function for timestamped messages
@@ -192,6 +192,9 @@ def main():
     output_subsegments_tsv = os.path.join(
         output_dir, f"{sample_name}_subsegments.tsv"
     )
+    output_coverage_tsv = os.path.join(
+        output_dir, f"{sample_name}_coverage.tsv"
+    )
 
     # Step 1: Filter annotation
     filtered_gtf = filter_annotation_by_gene_type(args.annotation)
@@ -228,25 +231,31 @@ def main():
     )
     genes = identify_pas_in_segments(genes, args.pas_atlas)
 
-    # Step 7: Write to GTF (including segments and subsegments)
-    log_message("Writing genes, segments and subsegments to GTF...")
-    write_segments_pas_to_gtf(genes, output_gtf)
-
-    # Step 8: Calculate mean coverage for subsegments
-    log_message("Calculating mean coverage for subsegments...")
-    coverage_results = calculate_mean_coverage(
-        genes, args.coverage[0], args.coverage[1]
-    )  # Pass both coverage files and genes
-
-    # Step 9: Write coverage results
-    log_message("Writing coverage results...")
-    write_coverage_results(
+    # Step 7: Write to TSV (including segments and subsegments)
+    log_message("Writing genes, segments and subsegments to TSV...")
+    write_segments_pas_to_tsv(
         genes,
-        coverage_results,
         output_genes_tsv,
         output_segments_tsv,
         output_subsegments_tsv,
-    )  # Pass genes too
+    )
+    # Step 8: Write to GTF (including segments and subsegments)
+    log_message("Writing genes, segments and subsegments to GTF...")
+    write_segments_pas_to_gtf(genes, output_gtf)
+
+    # Step 9: Calculate mean coverage for subsegments
+    log_message("Calculating mean coverage for subsegments...")
+
+    subsegments_df = pd.read_csv(output_subsegments_tsv, sep="\t")
+    coverage_results = calculate_mean_coverage(
+        subsegments_df, args.coverage[0], args.coverage[1]
+    )  # Pass DataFrame
+
+    # Step 10: Write coverage results to TSV
+    log_message("Writing coverage results to TSV...")
+    write_coverage_results(
+        coverage_results, output_coverage_tsv
+    )  # Write to the new TSV
 
     log_message(
         "Genomic segment construction, PAS identification,"
