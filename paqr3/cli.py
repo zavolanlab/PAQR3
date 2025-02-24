@@ -1,11 +1,8 @@
 import argparse
 import os
 from datetime import datetime
+from gtfparse import read_gtf  # type: ignore
 from paqr3.version import __version__
-from paqr3.filter_annotation import (
-    filter_annotation_by_gene_type,
-    resolve_gene_overlaps,
-)
 from paqr3.construct_segments import (
     extend_gene_coordinates,
     extend_exon_downstream,
@@ -197,14 +194,13 @@ def main():
         output_dir, f"{sample_name}_coverage.tsv"
     )
 
-    # Step 1: Filter annotation
-    filtered_gtf = filter_annotation_by_gene_type(args.annotation)
-    log_message("Resolving gene overlaps...")
-    filtered_gtf = resolve_gene_overlaps(filtered_gtf)
+    # Step 1: Read annotation
+    log_message("Reading annotation GTF...")
+    gtf_data = read_gtf(args.annotation, result_type="pandas")
 
     # Step 2: Parse GTF to Gene/Transcript/Region objects
     log_message("Parsing GTF to Gene/Transcript/Region objects...")
-    genes = parse_gtf_to_genes(filtered_gtf)
+    genes = parse_gtf_to_genes(gtf_data)
 
     # Step 2.5: Extend gene coordinates
     log_message("Extending gene coordinates...")
