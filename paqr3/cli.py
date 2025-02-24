@@ -14,6 +14,7 @@ from paqr3.construct_segments import (
     identify_pas_in_segments,
     write_segments_pas_to_tsv,
     write_segments_pas_to_gtf,
+    create_subsegments_dataframe,
 )
 from paqr3.calculate_coverages import (
     calculate_mean_coverage,
@@ -233,7 +234,7 @@ def main():
 
     # Step 7: Write to TSV (including segments and subsegments)
     log_message("Writing genes, segments and subsegments to TSV...")
-    write_segments_pas_to_tsv(
+    gene_mapping = write_segments_pas_to_tsv(
         genes,
         output_genes_tsv,
         output_segments_tsv,
@@ -246,7 +247,8 @@ def main():
     # Step 9: Calculate mean coverage for subsegments
     log_message("Calculating mean coverage for subsegments...")
 
-    subsegments_df = pd.read_csv(output_subsegments_tsv, sep="\t")
+    subsegments_df = create_subsegments_dataframe(genes, gene_mapping)
+
     coverage_results = calculate_mean_coverage(
         subsegments_df, args.coverage[0], args.coverage[1]
     )  # Pass DataFrame

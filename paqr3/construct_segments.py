@@ -443,22 +443,51 @@ def identify_pas_in_segments(genes, pas_atlas_bed):
 
                 current_subsegment_start = segment_start
 
-                for interval in sorted_intervals:
-                    pas_start, pas_end, pas_fields = (
-                        interval.begin,
-                        interval.end,
-                        interval.data,
-                    )
-                    pas_id = pas_fields[3]
+                if (
+                    sorted_intervals
+                ):  # Only proceed if there are overlapping intervals.
+                    for interval in sorted_intervals:
+                        pas_start, pas_end, pas_fields = (
+                            interval.begin,
+                            interval.end,
+                            interval.data,
+                        )
+                        pas_id = pas_fields[3]
 
-                    # Create subsegment up to PAS start
-                    if pas_start > current_subsegment_start:
+                        # Create subsegment up to PAS start
+                        if pas_start > current_subsegment_start:
+                            subsegments.append(
+                                Region(
+                                    region_type="subsegment",
+                                    chrom=chrom,
+                                    start=current_subsegment_start,
+                                    end=pas_start - 1,
+                                    strand=strand,
+                                    attributes={
+                                        "gene_id": gene.gene_id,
+                                        "segment_id": segment.attributes[
+                                            "segment_number"
+                                        ],
+                                        "subsegment_number": len(subsegments)
+                                        + 1,
+                                        "strand": strand,
+                                    },  # Added strand
+                                )
+                            )
+
+                        current_subsegment_start = (
+                            pas_end + 1
+                        )  # Start next subsegment after PAS end
+                        overlapping_pas.append(pas_id)
+
+                    # Create any remaining subsegment after the last PAS
+                    if current_subsegment_start <= segment_end:
                         subsegments.append(
                             Region(
                                 region_type="subsegment",
                                 chrom=chrom,
                                 start=current_subsegment_start,
-                                end=pas_start - 1,
+                                end=segment_end,
                                 strand=strand,
                                 attributes={
                                     "gene_id": gene.gene_id,
@@ -470,50 +499,6 @@ def identify_pas_in_segments(genes, pas_atlas_bed):
                                 },  # Added strand
                             )
                         )
-
-                    # Create subsegment for PAS region
-                    subsegments.append(
-                        Region(
-                            region_type="subsegment",
-                            chrom=chrom,
-                            start=pas_start,
-                            end=pas_end,
-                            strand=strand,
-                            attributes={
-                                "gene_id": gene.gene_id,
-                                "segment_id": segment.attributes[
-                                    "segment_number"
-                                ],
-                                "subsegment_number": len(subsegments) + 1,
-                                "strand": strand,
-                            },  # Added strand
-                        )
-                    )
-
-                    current_subsegment_start = (
-                        pas_end + 1
-                    )  # Start next subsegment after PAS end
-                    overlapping_pas.append(pas_id)
-
-                # Create any remaining subsegment after the last PAS
-                if current_subsegment_start <= segment_end:
-                    subsegments.append(
-                        Region(
-                            region_type="subsegment",
-                            chrom=chrom,
-                            start=current_subsegment_start,
-                            end=segment_end,
-                            strand=strand,
-                            attributes={
-                                "gene_id": gene.gene_id,
-                                "segment_id": segment.attributes[
-                                    "segment_number"
-                                ],
-                                "subsegment_number": len(subsegments) + 1,
-                                "strand": strand,
-                            },  # Added strand
-                        )
-                    )
 
             segment.attributes["overlapping_pas"] = overlapping_pas
             segment.subsegments = subsegments  # Add subsegments to the segment
@@ -659,4 +644,38 @@ def write_segments_pas_to_tsv(
 
     log_message(
         f"Genes, segments, and subsegments written to {out_genes_tsv}, {out_segments_tsv}, and {out_subsegments_tsv}"
+    )
+    return gene_mapping
+
+
+def create_subsegments_dataframe(genes, gene_mapping):
+    subsegments_data = []
+    for gene in genes.values():
+        for segment in gene.segments:
+            if hasattr(segment, "subsegments"):
+                for subsegment in segment.subsegments:
+                    # Filter out subsegments that overlap PAS sites
+                    if subsegment.end - subsegment.start > 0:
+                        subsegments_data.append(
+                            [
+                                gene_mapping[gene.gene_id],
+                                segment.attributes["segment_number"],
+                                subsegment.attributes["subsegment_number"],
+                                subsegment.chrom,
+                                subsegment.start,
+                                subsegment.end,
+                                subsegment.strand,
+                            ]
+                        )
+    return pd.DataFrame(
+        subsegments_data,
+        columns=[
+            "gene_unique_id",
+            "segment_number",
+            "subsegment_number",
+            "chrom",
+            "start",
+            "end",
+            "strand",
+        ],
     )
