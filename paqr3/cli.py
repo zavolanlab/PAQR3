@@ -118,28 +118,29 @@ def main():
         )
     )
     parser.add_argument(
-        "--annotation",
+        "-de",
+        "--downstream_exon_extension",
+        type=int,
+        default=200,
+        help="Number of bases to extend terminal exons. Default: 200.",
+    )
+    parser.add_argument(
         "-a",
+        "--annotation",
         type=str,
         required=True,
         help="Path to the annotation GTF file.",
     )
     parser.add_argument(
-        "--downstream_exon_extension",
-        type=int,
-        default=200,
-        help="Number of bases to extend terminal exons.",
-    )
-    parser.add_argument(
-        "--pas_atlas",
         "-pa",
+        "--pas_atlas",
         type=str,
         required=True,
         help="Path to the PAS atlas BED file.",
     )
     parser.add_argument(
-        "--coverage",
         "-c",
+        "--coverage",
         type=str,
         required=True,
         nargs=2,
@@ -149,15 +150,15 @@ def main():
         ),
     )
     parser.add_argument(
-        "--output_dir",
         "-o",
+        "--output_dir",
         type=str,
         required=True,
         help="Path to the output directory.",
     )
     parser.add_argument(
-        "--version",
         "-v",
+        "--version",
         action="version",
         version=(
             f"PAQR3 v{__version__},"
