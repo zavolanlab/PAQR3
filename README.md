@@ -20,35 +20,30 @@ This will install PAQR3 and its dependencies.
 The main entry point for PAQR3 is the `paqr3` command.  Here's how to use it:
 
 ```bash
-usage: paqr3 [-h] [--strandedness {true,false}] [--downstream_exon_extension INT]
-             [--version]
-             --annotation ANNOTATION --pas_atlas PAS_ATLAS --output_regions OUTPUT_REGIONS
-             --coverage COVERAGE --output_coverage OUTPUT_COVERAGE
+usage: paqr3 [-h] --annotation ANNOTATION [--downstream_exon_extension DOWNSTREAM_EXON_EXTENSION] --pas_atlas PAS_ATLAS --coverage COVERAGE COVERAGE --output_dir OUTPUT_DIR [--version]
 
 Filter and construct genomic segments from RNA-Seq annotations.
 
 options:
   -h, --help            show this help message and exit
   -v, --version,        show version information and exit
-  --strandedness {true,false}
-                        Whether the data is stranded (true) or unstranded
-                        (false). (default: true)
-  --downstream_exon_extension INT
+  -de, --downstream_exon_extension INT
                         Number of bases to extend terminal exons. (default:
                         200)
-  --annotation ANNOTATION
+  -a, --annotation ANNOTATION
                         Path to the annotation GTF file.
-  --pas_atlas PAS_ATLAS   Path to the PAS atlas BED file.
-  --output_regions OUTPUT_REGIONS
-                        Path to the output GTF file for regions and segments.
-  --coverage COVERAGE   Path to the coverage BED file.
-  --output_coverage OUTPUT_COVERAGE
-                        Path to output TSV file for coverage results.
+  -pa, --pas_atlas PAS_ATLAS   Path to the PAS atlas BED file.
+  -c, --coverage COVERAGE   Path to the coverage BigWig files. For every sample, a positive and negative stranded BW is required.
+  -o, --output_dir OUTPUT_DIRECTORY
+                        Path to the output directory.
 ```
 
 Output Files
 
     output_regions.gtf: A GTF file containing the processed genomic regions, constructed segments, and identified PAS sites.
+    output_genes.tsv: A TSV file containing the unique gene ID for every gene in the input annotation.
+    output_segments.tsv: A TSV file contining the segments constructed based on the transcripts isoforms for each gene.
+    output_subsegments.tsv: A TSV file containing the subsegments constructed based on segments with overlapping PAS.
     output_coverage.tsv: A TSV file containing the calculated mean coverage for each segment.
 
 ## Contributing
