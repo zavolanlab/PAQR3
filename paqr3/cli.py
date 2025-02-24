@@ -199,9 +199,8 @@ def main():
 
     # Step 1: Filter annotation
     filtered_gtf = filter_annotation_by_gene_type(args.annotation)
-    stranded = True  # Stranded is assumed
-    log_message(f"Resolving gene overlaps (strandedness: {stranded})...")
-    filtered_gtf = resolve_gene_overlaps(filtered_gtf, strandedness=stranded)
+    log_message("Resolving gene overlaps...")
+    filtered_gtf = resolve_gene_overlaps(filtered_gtf)
 
     # Step 2: Parse GTF to Gene/Transcript/Region objects
     log_message("Parsing GTF to Gene/Transcript/Region objects...")

@@ -35,7 +35,7 @@ def filter_annotation_by_gene_type(gtf_file, gene_types=["protein_coding"]):
     return filtered_gtf
 
 
-def resolve_gene_overlaps(filtered_gtf, strandedness=True):
+def resolve_gene_overlaps(filtered_gtf):
     """
     Resolves gene overlaps based on strandedness,
     updating exon coordinates.
@@ -57,10 +57,7 @@ def resolve_gene_overlaps(filtered_gtf, strandedness=True):
     )
 
     log_message("Checking for overlaps...")
-    if strandedness:
-        overlaps = gene_bed.intersect(gene_bed, wo=True, s=True)
-    else:
-        overlaps = gene_bed.intersect(gene_bed, wo=True)
+    overlaps = gene_bed.intersect(gene_bed, wo=True, s=True)
 
     log_message("Resolving overlaps...")
     genes_to_remove = set()
@@ -74,9 +71,9 @@ def resolve_gene_overlaps(filtered_gtf, strandedness=True):
         start1, end1 = int(fields[1]), int(fields[2])
         start2, end2 = int(fields[7]), int(fields[8])
         chrom = fields[0]
-        strand = fields[5] if strandedness else "+"
+        strand = fields[5]
 
-        group_key = (chrom, strand) if strandedness else (chrom,)
+        group_key = (chrom, strand)
         if group_key not in overlap_groups:
             overlap_groups[group_key] = []
         overlap_groups[group_key].append(
