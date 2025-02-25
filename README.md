@@ -1,5 +1,7 @@
 # PAQR3: Poly(A) site Quantification on RNA-Seq data
 
+[![license][badge-license]][badge-url-license]
+
 PAQR3 is a command-line tool for quantifying poly(A) sites from standard RNA-Seq data. 
 It processes annotation files (GTF), PAS atlases (BED), and coverage data (BED) to identify and quantify poly(A) sites associated with genomic segments.
 
@@ -42,9 +44,10 @@ Output Files
 
     output_regions.gtf: A GTF file containing the processed genomic regions, constructed segments, and identified PAS sites.
     output_genes.tsv: A TSV file containing the unique gene ID for every gene in the input annotation.
+    output_PAS.tsv: A TSV file containing the unique gene ID for every PAS in the input PAS atlas.
     output_segments.tsv: A TSV file contining the segments constructed based on the transcripts isoforms for each gene.
     output_subsegments.tsv: A TSV file containing the subsegments constructed based on segments with overlapping PAS.
-    output_coverage.tsv: A TSV file containing the calculated mean coverage for each segment.
+    output_coverage.tsv: A TSV file containing the calculated mean coverage and the sum of squared coverage values for each segment.
 
 ## Contributing
 
@@ -53,3 +56,6 @@ Contributions are welcome! Please see the contributing guidelines for more infor
 ## License
 
 GNU General Public License v2.0
+
+[badge-license]: <https://img.shields.io/badge/License-GPL_v2-blue.svg>
+[badge-url-license]: <https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html>
