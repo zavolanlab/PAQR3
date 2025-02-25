@@ -1,5 +1,5 @@
+import logging
 import pandas as pd  # type: ignore
-from datetime import datetime
 from pybedtools import BedTool  # type: ignore
 from intervaltree import Interval, IntervalTree  # type: ignore
 from paqr3.models import Region, Gene, Transcript
@@ -7,8 +7,7 @@ from gtfparse import read_gtf  # type: ignore
 
 
 def log_message(message):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] {message}")
+    logging.info(message)
 
 
 class ConstructSegments:
@@ -109,10 +108,6 @@ class ConstructSegments:
 
     def extend_gene_coordinates(self):
         """Extends gene coordinates (correctly handles negative strand)."""
-
-        log_message(
-            f"Extending gene coordinates ({self.downstream_exon_extension} bp)..."
-        )
 
         sorted_genes = sorted(
             self.genes.values(),
@@ -276,10 +271,6 @@ class ConstructSegments:
 
     def extend_exon_downstream(self):
         """Extends terminal exons (CORRECTLY handles negative strand)."""
-
-        log_message(
-            f"Extending terminal exons ({self.downstream_exon_extension} bp)..."
-        )
 
         for gene in self.genes.values():
             gene_strand = next(
@@ -523,6 +514,26 @@ class ConstructSegments:
         log_message("Building PAS interval tree...")
         pas_trees = {}
 
+        # Create PAS mapping and data in identify_pas_in_segments
+        self.pas_mapping = {}
+        self.pas_data = []  # Corrected line
+        unique_pas_id_counter = 1
+
+        for pas in pas_bed:
+            pas_id = f"{pas.chrom}:{pas.start}:{pas.end}:{pas.strand}"
+            self.pas_mapping[pas_id] = unique_pas_id_counter
+            self.pas_data.append(
+                [
+                    unique_pas_id_counter,
+                    pas.chrom,
+                    pas.start,
+                    pas.end,
+                    pas.strand,
+                    pas.name,
+                ]
+            )
+            unique_pas_id_counter += 1
+
         for pas in pas_bed:
             chrom = pas.chrom
             strand = pas.strand
@@ -565,7 +576,8 @@ class ConstructSegments:
                                 interval.end,
                                 interval.data,
                             )
-                            pas_id = pas_fields[3]
+                            pas_id = f"{pas_fields[0]}:{pas_fields[1]}:{pas_fields[2]}:{pas_fields[5]}"
+                            unique_pas_id = self.pas_mapping.get(pas_id)
 
                             # Create subsegment up to PAS start
                             if pas_start > current_subsegment_start:
@@ -586,16 +598,13 @@ class ConstructSegments:
                                             )
                                             + 1,
                                             "strand": strand,
-                                        },  # Added strand
+                                        },
                                     )
                                 )
 
-                            current_subsegment_start = (
-                                pas_end + 1
-                            )  # Start next subsegment after PAS end
-                            overlapping_pas.append(pas_id)
+                            current_subsegment_start = pas_end + 1
+                            overlapping_pas.append(unique_pas_id)
 
-                        # Create any remaining subsegment after the last PAS
                         if current_subsegment_start <= segment_end:
                             subsegments.append(
                                 Region(
@@ -612,25 +621,37 @@ class ConstructSegments:
                                         "subsegment_number": len(subsegments)
                                         + 1,
                                         "strand": strand,
-                                    },  # Added strand
+                                    },
                                 )
                             )
 
                 segment.attributes["overlapping_pas"] = overlapping_pas
-                segment.subsegments = (
-                    subsegments  # Add subsegments to the segment
-                )
+                segment.subsegments = subsegments
 
     def write_segments_pas_to_tsv(
-        self, out_genes_tsv, out_segments_tsv, out_subsegments_tsv
+        self, out_genes_tsv, out_segments_tsv, out_subsegments_tsv, out_pas_tsv
     ):
-        """Writes genes, segments, and subsegments to TSV files."""
+        """Writes genes, segments, subsegments, and PAS to TSV files."""
 
         gene_mapping = {}
         unique_gene_id_counter = 1
         genes_data = []
         segments_data = []
         subsegments_data = []
+
+        pas_df = pd.DataFrame(
+            self.pas_data,
+            columns=[
+                "unique_pas_id",
+                "chrom",
+                "start",
+                "end",
+                "strand",
+                "pas_id",
+            ],
+        )
+        pas_df.to_csv(out_pas_tsv, sep="\t", index=False)
+        log_message(f"PAS written to {out_pas_tsv}")
 
         for gene in self.genes.values():
             first_transcript = next(iter(gene.transcripts.values()), None)
@@ -670,9 +691,13 @@ class ConstructSegments:
             )
 
             for segment in gene.segments:
-                overlapping_pas_str = ",".join(
-                    segment.attributes.get("overlapping_pas", [])
-                )
+                overlapping_pas_ids = []
+                if "overlapping_pas" in segment.attributes:
+                    for pas_id in segment.attributes["overlapping_pas"]:
+                        if pas_id:
+                            overlapping_pas_ids.append(str(pas_id))
+                overlapping_pas_str = ",".join(overlapping_pas_ids)
+
                 segments_data.append(
                     [
                         unique_gene_id,
@@ -745,6 +770,38 @@ class ConstructSegments:
         )
         self.gene_mapping = gene_mapping
 
+    def create_subsegments_dataframe(self):
+        subsegments_data = []
+        for gene in self.genes.values():
+            for segment in gene.segments:
+                if hasattr(segment, "subsegments"):
+                    for subsegment in segment.subsegments:
+                        # Filter out subsegments that overlap PAS sites
+                        if subsegment.end - subsegment.start > 0:
+                            subsegments_data.append(
+                                [
+                                    self.gene_mapping[gene.gene_id],
+                                    segment.attributes["segment_number"],
+                                    subsegment.attributes["subsegment_number"],
+                                    subsegment.chrom,
+                                    subsegment.start,
+                                    subsegment.end,
+                                    subsegment.strand,
+                                ]
+                            )
+        return pd.DataFrame(
+            subsegments_data,
+            columns=[
+                "gene_unique_id",
+                "segment_number",
+                "subsegment_number",
+                "chrom",
+                "start",
+                "end",
+                "strand",
+            ],
+        )
+
     def write_segments_pas_to_gtf(self, output_file):
         """Writes segments and PAS to GTF file."""
 
@@ -800,44 +857,13 @@ class ConstructSegments:
                             )
                             f.write(subsegment_line + "\n")
 
-    def create_subsegments_dataframe(self):
-        subsegments_data = []
-        for gene in self.genes.values():
-            for segment in gene.segments:
-                if hasattr(segment, "subsegments"):
-                    for subsegment in segment.subsegments:
-                        # Filter out subsegments that overlap PAS sites
-                        if subsegment.end - subsegment.start > 0:
-                            subsegments_data.append(
-                                [
-                                    self.gene_mapping[gene.gene_id],
-                                    segment.attributes["segment_number"],
-                                    subsegment.attributes["subsegment_number"],
-                                    subsegment.chrom,
-                                    subsegment.start,
-                                    subsegment.end,
-                                    subsegment.strand,
-                                ]
-                            )
-        return pd.DataFrame(
-            subsegments_data,
-            columns=[
-                "gene_unique_id",
-                "segment_number",
-                "subsegment_number",
-                "chrom",
-                "start",
-                "end",
-                "strand",
-            ],
-        )
-
     def run(
         self,
         output_gtf,
         output_genes_tsv,
         output_segments_tsv,
         output_subsegments_tsv,
+        output_pas_tsv,
     ):
         log_message("Reading annotation GTF...")
         gtf_data = read_gtf(self.annotation_file, result_type="pandas")
@@ -862,9 +888,12 @@ class ConstructSegments:
         )
         self.identify_pas_in_segments()
 
-        log_message("Writing genes, segments and subsegments to TSV...")
+        log_message("Writing genes, segments, subsegments, and PAS to TSV...")
         self.write_segments_pas_to_tsv(
-            output_genes_tsv, output_segments_tsv, output_subsegments_tsv
+            output_genes_tsv,
+            output_segments_tsv,
+            output_subsegments_tsv,
+            output_pas_tsv,
         )
 
         log_message("Writing genes, segments and subsegments to GTF...")
