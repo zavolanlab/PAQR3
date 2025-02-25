@@ -651,7 +651,6 @@ class ConstructSegments:
             ],
         )
         pas_df.to_csv(out_pas_tsv, sep="\t", index=False)
-        log_message(f"PAS written to {out_pas_tsv}")
 
         for gene in self.genes.values():
             first_transcript = next(iter(gene.transcripts.values()), None)
@@ -766,7 +765,8 @@ class ConstructSegments:
         subsegments_df.to_csv(out_subsegments_tsv, sep="\t", index=False)
 
         log_message(
-            f"Genes, segments, and subsegments written to {out_genes_tsv}, {out_segments_tsv}, and {out_subsegments_tsv}"
+            "PAS, genes, segments, and subsegments written to "
+            f"{out_pas_tsv}, {out_genes_tsv}, {out_segments_tsv}, and {out_subsegments_tsv}"
         )
         self.gene_mapping = gene_mapping
 
