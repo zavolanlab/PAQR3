@@ -1,8 +1,7 @@
 import logging
 import os
-from datetime import datetime
 from paqr3.construct_segments import ConstructSegments
-from paqr3.calculate_coverages import CalculateCoverages
+from paqr3.calculate_cov_metrics import CalculateCoverages
 
 logging.basicConfig(
     format="[{asctime}] {message}",
