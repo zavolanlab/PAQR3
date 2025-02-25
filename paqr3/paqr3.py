@@ -1,12 +1,29 @@
+import logging
 import os
 from datetime import datetime
 from paqr3.construct_segments import ConstructSegments
 from paqr3.calculate_coverages import CalculateCoverages
 
+logging.basicConfig(
+    format="[{asctime}] {message}",
+    style="{",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO,
+)
+
+# Set logging for gtfparse (and other libraries using logging)
+logging.getLogger().handlers.clear()  # Remove existing handlers
+handler = logging.StreamHandler()
+formatter = logging.Formatter(
+    "[{asctime}] {message}", style="{", datefmt="%Y-%m-%d %H:%M:%S"
+)
+handler.setFormatter(formatter)
+logging.getLogger().addHandler(handler)
+logging.getLogger().setLevel(logging.INFO)
+
 
 def log_message(message):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] {message}")
+    logging.info(message)
 
 
 class PAQR3:
@@ -50,6 +67,7 @@ class PAQR3:
         output_coverage_tsv = os.path.join(
             output_dir, f"{sample_name}_coverage.tsv"
         )
+        output_pas_tsv = os.path.join(output_dir, f"{sample_name}_PAS.tsv")
 
         # Construct segments
         construct_segments = ConstructSegments(
@@ -62,6 +80,7 @@ class PAQR3:
             output_genes_tsv,
             output_segments_tsv,
             output_subsegments_tsv,
+            output_pas_tsv,
         )
 
         # Calculate coverages
@@ -72,7 +91,4 @@ class PAQR3:
 
         calculate_coverages.run(subsegments_df, output_coverage_tsv)
 
-        log_message(
-            "Genomic segment construction, PAS identification, "
-            "subsegment construction and coverage calculation pipeline completed."
-        )
+        log_message("PAQR3 pipeline completed.")

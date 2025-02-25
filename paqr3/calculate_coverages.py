@@ -1,12 +1,11 @@
+import logging
 import pandas as pd  # type: ignore
 import pyBigWig  # type: ignore
 import numpy as np
-from datetime import datetime
 
 
 def log_message(message):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] {message}")
+    logging.info(message)
 
 
 class CalculateCoverages:
@@ -16,8 +15,6 @@ class CalculateCoverages:
 
     def calculate_mean_coverage(self, subsegments_df):
         """Calculates mean coverage and returns a DataFrame."""
-
-        log_message("Calculating mean coverage...")
 
         bw_pos = pyBigWig.open(self.coverage_bw_pos)
         bw_neg = pyBigWig.open(self.coverage_bw_neg)
