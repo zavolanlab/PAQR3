@@ -593,10 +593,6 @@ class ConstructSegments:
                                             "segment_id": segment.attributes[
                                                 "segment_number"
                                             ],
-                                            "subsegment_number": len(
-                                                subsegments
-                                            )
-                                            + 1,
                                             "strand": strand,
                                         },
                                     )
@@ -618,20 +614,24 @@ class ConstructSegments:
                                         "segment_id": segment.attributes[
                                             "segment_number"
                                         ],
-                                        "subsegment_number": len(subsegments)
-                                        + 1,
                                         "strand": strand,
                                     },
                                 )
                             )
 
+                if strand == "-":
+                    subsegments.reverse()
+
+                for i, subsegment in enumerate(subsegments):
+                    subsegment.attributes["subsegment_number"] = i + 1
+
                 segment.attributes["overlapping_pas"] = overlapping_pas
                 segment.subsegments = subsegments
 
-    def write_segments_pas_to_tsv(
-        self, out_genes_tsv, out_segments_tsv, out_subsegments_tsv, out_pas_tsv
+    def write_segments_pas_to_bed(
+        self, out_genes_bed, out_segments_bed, out_subsegments_bed, out_pas_bed
     ):
-        """Writes genes, segments, subsegments, and PAS to TSV files."""
+        """Writes genes, segments, subsegments, and PAS to BED files."""
 
         gene_mapping = {}
         unique_gene_id_counter = 1
@@ -650,7 +650,14 @@ class ConstructSegments:
                 "pas_id",
             ],
         )
-        pas_df.to_csv(out_pas_tsv, sep="\t", index=False)
+
+        pas_bed_data = pas_df[
+            ["chrom", "start", "end", "pas_id", "unique_pas_id", "strand"]
+        ]
+        pas_bed_data = pas_bed_data[
+            ["chrom", "start", "end", "unique_pas_id", "pas_id", "strand"]
+        ]
+        pas_bed_data.to_csv(out_pas_bed, sep="\t", index=False, header=False)
 
         for gene in self.genes.values():
             first_transcript = next(iter(gene.transcripts.values()), None)
@@ -667,9 +674,6 @@ class ConstructSegments:
 
             genes_data.append(
                 [
-                    unique_gene_id,
-                    gene.gene_id,
-                    gene.attributes.get("gene_name", ""),
                     chrom,
                     min(
                         list(
@@ -685,6 +689,8 @@ class ConstructSegments:
                             for r in t.regions
                         )
                     ),
+                    unique_gene_id,
+                    gene.gene_id,
                     strand,
                 ]
             )
@@ -696,16 +702,17 @@ class ConstructSegments:
                         if pas_id:
                             overlapping_pas_ids.append(str(pas_id))
                 overlapping_pas_str = ",".join(overlapping_pas_ids)
+                if not overlapping_pas_str:
+                    overlapping_pas_str = "."
 
                 segments_data.append(
                     [
-                        unique_gene_id,
-                        segment.attributes["segment_number"],
                         segment.chrom,
                         segment.start,
                         segment.end,
-                        segment.strand,
+                        f"{unique_gene_id}.{segment.attributes['segment_number']}",
                         overlapping_pas_str,
+                        segment.strand,
                     ]
                 )
 
@@ -713,12 +720,11 @@ class ConstructSegments:
                     for subsegment in segment.subsegments:
                         subsegments_data.append(
                             [
-                                unique_gene_id,
-                                segment.attributes["segment_number"],
-                                subsegment.attributes["subsegment_number"],
                                 subsegment.chrom,
                                 subsegment.start,
                                 subsegment.end,
+                                f"{unique_gene_id}.{segment.attributes['segment_number']}.{subsegment.attributes['subsegment_number']}",
+                                ".",
                                 subsegment.strand,
                             ]
                         )
@@ -726,47 +732,48 @@ class ConstructSegments:
         genes_df = pd.DataFrame(
             genes_data,
             columns=[
-                "unique_gene_id",
-                "gene_id",
-                "gene_name",
                 "chrom",
                 "start",
                 "end",
+                "unique_gene_id",
+                "gene_id",
                 "strand",
             ],
         )
         segments_df = pd.DataFrame(
             segments_data,
             columns=[
-                "gene_unique_id",
-                "segment_number",
                 "chrom",
                 "start",
                 "end",
-                "strand",
+                "gene_segment_id",
                 "overlapping_pas",
+                "strand",
             ],
         )
         subsegments_df = pd.DataFrame(
             subsegments_data,
             columns=[
-                "gene_unique_id",
-                "segment_number",
-                "subsegment_number",
                 "chrom",
                 "start",
                 "end",
+                "gene_segment_subsegment_id",
+                "score",
                 "strand",
             ],
         )
 
-        genes_df.to_csv(out_genes_tsv, sep="\t", index=False)
-        segments_df.to_csv(out_segments_tsv, sep="\t", index=False)
-        subsegments_df.to_csv(out_subsegments_tsv, sep="\t", index=False)
+        genes_df.to_csv(out_genes_bed, sep="\t", index=False, header=False)
+        segments_df.to_csv(
+            out_segments_bed, sep="\t", index=False, header=False
+        )
+        subsegments_df.to_csv(
+            out_subsegments_bed, sep="\t", index=False, header=False
+        )
 
         log_message(
             "PAS, genes, segments, and subsegments written to "
-            f"{out_pas_tsv}, {out_genes_tsv}, {out_segments_tsv}, and {out_subsegments_tsv}"
+            f"{out_pas_bed}, {out_genes_bed}, {out_segments_bed}, and {out_subsegments_bed}"
         )
         self.gene_mapping = gene_mapping
 
@@ -802,64 +809,8 @@ class ConstructSegments:
             ],
         )
 
-    def write_segments_pas_to_gtf(self, output_file):
-        """Writes segments and PAS to GTF file."""
-
-        with open(output_file, "w") as f:
-            for gene in self.genes.values():
-                # Write gene
-                if "start" in gene.attributes:
-                    gene_start = gene.attributes["start"]
-                    gene_end = gene.attributes["end"]
-                else:
-                    gene_start = min(
-                        list(
-                            r.start
-                            for t in gene.transcripts.values()
-                            for r in t.regions
-                        )
-                    )
-                    gene_end = max(
-                        list(
-                            r.end
-                            for t in gene.transcripts.values()
-                            for r in t.regions
-                        )
-                    )
-                gene_line = (
-                    f"{next(iter(gene.transcripts.values())).regions[0].chrom}\t"
-                    f"paqr3\tgene\t{gene_start}\t{gene_end}\t.\t"
-                    f"{next(iter(gene.transcripts.values())).strand}\t.\t"
-                    f'gene_id "{gene.gene_id}";'
-                )
-                f.write(gene_line + "\n")
-
-                # Write segments
-                for segment in gene.segments:
-                    segment_line = (
-                        f"{segment.chrom}\tpaqr3\tsegment\t{segment.start}\t"
-                        f"{segment.end}\t.\t{segment.strand}\t.\t"
-                        f'gene_id "{gene.gene_id}"; segment_number '
-                        f'"{segment.attributes["segment_number"]}";'
-                    )
-                    f.write(segment_line + "\n")
-
-                    # Write subsegments
-                    if hasattr(segment, "subsegments"):
-                        for subsegment in segment.subsegments:
-                            subsegment_line = (
-                                f"{subsegment.chrom}\tpaqr3\tsubsegment\t"
-                                f"{subsegment.start}\t{subsegment.end}\t.\t"
-                                f"{subsegment.strand}\t.\tgene_id "
-                                f'"{gene.gene_id}"; segment_number '
-                                f'"{segment.attributes["segment_number"]}"; '
-                                f'subsegment_number "{subsegment.attributes["subsegment_number"]}";'
-                            )
-                            f.write(subsegment_line + "\n")
-
     def run(
         self,
-        output_gtf,
         output_genes_tsv,
         output_segments_tsv,
         output_subsegments_tsv,
@@ -889,12 +840,9 @@ class ConstructSegments:
         self.identify_pas_in_segments()
 
         log_message("Writing genes, segments, subsegments, and PAS to TSV...")
-        self.write_segments_pas_to_tsv(
+        self.write_segments_pas_to_bed(
             output_genes_tsv,
             output_segments_tsv,
             output_subsegments_tsv,
             output_pas_tsv,
         )
-
-        log_message("Writing genes, segments and subsegments to GTF...")
-        self.write_segments_pas_to_gtf(output_gtf)

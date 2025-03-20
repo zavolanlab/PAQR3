@@ -44,8 +44,8 @@ class PAQR3:
 
     def run(self):
         # Extract sample name from coverage files
-        sample_name_pos = os.path.basename(self.coverage_bw_pos).split("_")[0]
-        sample_name_neg = os.path.basename(self.coverage_bw_neg).split("_")[0]
+        sample_name_pos = os.path.basename(self.coverage_bw_pos).split(".")[0]
+        sample_name_neg = os.path.basename(self.coverage_bw_neg).split(".")[0]
 
         if sample_name_pos != sample_name_neg:
             raise ValueError("Coverage files must have the same sample name.")
@@ -55,18 +55,17 @@ class PAQR3:
         output_dir = os.path.join(self.output_dir, f"{sample_name}_results")
         os.makedirs(output_dir, exist_ok=True)
 
-        output_gtf = os.path.join(output_dir, f"{sample_name}.gtf")
-        output_genes_tsv = os.path.join(output_dir, f"{sample_name}_genes.tsv")
-        output_segments_tsv = os.path.join(
-            output_dir, f"{sample_name}_segments.tsv"
+        output_genes_bed = os.path.join(output_dir, f"{sample_name}_genes.bed")
+        output_segments_bed = os.path.join(
+            output_dir, f"{sample_name}_segments.bed"
         )
-        output_subsegments_tsv = os.path.join(
-            output_dir, f"{sample_name}_subsegments.tsv"
+        output_subsegments_bed = os.path.join(
+            output_dir, f"{sample_name}_subsegments.bed"
         )
         output_coverage_tsv = os.path.join(
-            output_dir, f"{sample_name}_coverage.tsv"
+            output_dir, f"{sample_name}_coverage.bed"
         )
-        output_pas_tsv = os.path.join(output_dir, f"{sample_name}_PAS.tsv")
+        output_pas_bed = os.path.join(output_dir, f"{sample_name}_PAS.bed")
 
         # Construct segments
         construct_segments = ConstructSegments(
@@ -75,11 +74,10 @@ class PAQR3:
             self.downstream_exon_extension,
         )
         construct_segments.run(
-            output_gtf,
-            output_genes_tsv,
-            output_segments_tsv,
-            output_subsegments_tsv,
-            output_pas_tsv,
+            output_genes_bed,
+            output_segments_bed,
+            output_subsegments_bed,
+            output_pas_bed,
         )
 
         # Calculate coverages
