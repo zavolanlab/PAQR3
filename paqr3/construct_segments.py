@@ -502,50 +502,102 @@ class ConstructSegments:
 
             gene.segments = segments
 
-    def identify_pas_in_segments(self):
+    def process_pas_atlas(self, merge_distance=5):
         """
-        Identifies PAS sites overlapping with segments
-        and constructs subsegments.
+        Processes the PAS atlas file, merging PAS sites if they are within `merge_distance` bp,
+        and constructs the PAS interval tree.
         """
-
         log_message("Reading PAS atlas...")
         pas_bed = BedTool(self.pas_atlas_file)
 
-        log_message("Building PAS interval tree...")
+        log_message("Processing PAS sites and building interval tree...")
         pas_trees = {}
-
-        # Create PAS mapping and data in identify_pas_in_segments
         self.pas_mapping = {}
-        self.pas_data = []  # Corrected line
+        self.pas_data = []
         unique_pas_id_counter = 1
+        merged_pas_sites = []
 
-        for pas in pas_bed:
-            pas_id = f"{pas.chrom}:{pas.start}:{pas.end}:{pas.strand}"
+        # Sort PAS sites by chromosome, strand, and start position
+        pas_sorted = sorted(
+            pas_bed, key=lambda p: (p.chrom, p.strand, int(p.start))
+        )
+
+        log_message(
+            f"Merging PAS sites within {merge_distance} bp distance..."
+        )
+        current_start, current_end, current_fields = None, None, None
+        current_chrom, current_strand = None, None
+
+        for pas in pas_sorted:
+            pas_chrom, pas_start, pas_end, pas_strand = (
+                pas.chrom,
+                int(pas.start),
+                int(pas.end),
+                pas.strand,
+            )
+            pas_fields = pas.fields
+
+            if current_start is None:
+                current_start, current_end, current_fields = (
+                    pas_start,
+                    pas_end,
+                    pas_fields,
+                )
+                current_chrom, current_strand = pas_chrom, pas_strand
+            elif (
+                pas_chrom == current_chrom
+                and pas_strand == current_strand
+                and pas_start - current_end <= merge_distance
+            ):  # ✅ Merge PAS if within `merge_distance` bp
+                current_end = max(
+                    current_end, pas_end
+                )  # Extend end if overlapping
+            else:
+                merged_pas_sites.append(
+                    (current_chrom, current_start, current_end, current_fields)
+                )
+                current_start, current_end, current_fields = (
+                    pas_start,
+                    pas_end,
+                    pas_fields,
+                )
+                current_chrom, current_strand = pas_chrom, pas_strand
+
+        if current_start is not None:
+            merged_pas_sites.append(
+                (current_chrom, current_start, current_end, current_fields)
+            )
+
+        # Assign PAS IDs and build interval tree
+        for chrom, start, end, pas_fields in merged_pas_sites:
+            pas_id = f"{chrom}:{start}:{end}:{pas_fields[5]}"
             self.pas_mapping[pas_id] = unique_pas_id_counter
             self.pas_data.append(
                 [
                     unique_pas_id_counter,
-                    pas.chrom,
-                    pas.start,
-                    pas.end,
-                    pas.strand,
-                    pas.name,
+                    chrom,
+                    start,
+                    end,
+                    pas_fields[5],
+                    pas_fields[3],
                 ]
             )
             unique_pas_id_counter += 1
 
-        for pas in pas_bed:
-            chrom = pas.chrom
-            strand = pas.strand
-            if (chrom, strand) not in pas_trees:
-                pas_trees[(chrom, strand)] = IntervalTree()
-            pas_trees[(chrom, strand)].add(
-                Interval(int(pas.start), int(pas.end), pas.fields)
+            if (chrom, pas_fields[5]) not in pas_trees:
+                pas_trees[(chrom, pas_fields[5])] = IntervalTree()
+            pas_trees[(chrom, pas_fields[5])].add(
+                Interval(start, end, pas_fields)
             )
 
+        return pas_trees
+
+    def identify_pas_in_segments(self, pas_trees):
+        """
+        Identifies PAS sites overlapping with segments and constructs subsegments.
+        """
         log_message(
-            "Identifying PAS overlaps with segments"
-            "and constructing subsegments..."
+            "Identifying PAS overlaps with segments and constructing subsegments..."
         )
 
         for gene in self.genes.values():
@@ -557,19 +609,18 @@ class ConstructSegments:
 
                 overlapping_pas = []
                 subsegments = []
+
                 if (chrom, strand) in pas_trees:
                     overlapping_intervals = pas_trees[(chrom, strand)][
                         segment_start:segment_end
                     ]
                     sorted_intervals = sorted(
                         overlapping_intervals, key=lambda x: x.begin
-                    )  # Sort by start position
+                    )
 
                     current_subsegment_start = segment_start
 
-                    if (
-                        sorted_intervals
-                    ):  # Only proceed if there are overlapping intervals.
+                    if sorted_intervals:
                         for interval in sorted_intervals:
                             pas_start, pas_end, pas_fields = (
                                 interval.begin,
@@ -579,7 +630,6 @@ class ConstructSegments:
                             pas_id = f"{pas_fields[0]}:{pas_fields[1]}:{pas_fields[2]}:{pas_fields[5]}"
                             unique_pas_id = self.pas_mapping.get(pas_id)
 
-                            # Create subsegment up to PAS start
                             if pas_start > current_subsegment_start:
                                 subsegments.append(
                                     Region(
@@ -811,10 +861,11 @@ class ConstructSegments:
 
     def run(
         self,
-        output_genes_tsv,
-        output_segments_tsv,
-        output_subsegments_tsv,
-        output_pas_tsv,
+        out_genes_bed,
+        out_segments_bed,
+        out_subsegments_bed,
+        out_pas_bed,
+        merge_distance=1,  # <-- Now an integer instead of a boolean
     ):
         log_message("Reading annotation GTF...")
         gtf_data = read_gtf(self.annotation_file, result_type="pandas")
@@ -834,15 +885,18 @@ class ConstructSegments:
         log_message("Constructing segments...")
         self.construct_segments()
 
+        log_message("Processing PAS atlas and constructing interval tree...")
+        pas_trees = self.process_pas_atlas(merge_distance)
+
         log_message(
             "Identifying PAS sites in segments and constructing subsegments..."
         )
-        self.identify_pas_in_segments()
+        self.identify_pas_in_segments(pas_trees)
 
         log_message("Writing genes, segments, subsegments, and PAS to TSV...")
         self.write_segments_pas_to_bed(
-            output_genes_tsv,
-            output_segments_tsv,
-            output_subsegments_tsv,
-            output_pas_tsv,
+            out_genes_bed,
+            out_segments_bed,
+            out_subsegments_bed,
+            out_pas_bed,
         )

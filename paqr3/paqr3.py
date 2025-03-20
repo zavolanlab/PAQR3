@@ -34,6 +34,7 @@ class PAQR3:
         coverage_bw_neg,
         output_dir,
         downstream_exon_extension,
+        merge_distance,
     ):
         self.annotation_file = annotation_file
         self.pas_atlas_file = pas_atlas_file
@@ -41,6 +42,7 @@ class PAQR3:
         self.coverage_bw_neg = coverage_bw_neg
         self.output_dir = output_dir
         self.downstream_exon_extension = downstream_exon_extension
+        self.merge_distance = merge_distance
 
     def run(self):
         # Extract sample name from coverage files
@@ -78,6 +80,7 @@ class PAQR3:
             output_segments_bed,
             output_subsegments_bed,
             output_pas_bed,
+            self.merge_distance,
         )
 
         # Calculate coverages
