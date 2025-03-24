@@ -38,6 +38,7 @@ class CalculateCoverages:
             if start < end:
                 try:
                     coverage = bw.values(chrom, start, end, numpy=True)
+                    coverage = np.nan_to_num(coverage, nan=0.0)
                 except ValueError:
                     coverage = np.array([])
             else:

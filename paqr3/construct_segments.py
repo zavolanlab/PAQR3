@@ -21,7 +21,7 @@ class ConstructSegments:
         self.gene_mapping = {}
 
     def parse_gtf_to_genes(self, gtf_data):
-        """Parses GTF data (pandas DataFrame) into a dictionary of Gene objects."""
+        """Parses GTF data (pandas DataFrame) into a dictionary of Gene objects, using BED-style coordinates."""
         genes = {}
         for _, row in gtf_data.iterrows():
             if row["feature"] == "gene":
@@ -45,6 +45,7 @@ class ConstructSegments:
                 }
                 gene = Gene(gene_id, attributes=gene_attributes)
                 genes[gene_id] = gene
+
             elif row["feature"] == "transcript":
                 gene_id = row["gene_id"]
                 transcript_id = row["transcript_id"]
@@ -71,6 +72,7 @@ class ConstructSegments:
                         attributes=transcript_attributes,
                     )
                     genes[gene_id].add_transcript(transcript)
+
             elif row["feature"] == "exon":
                 gene_id = row["gene_id"]
                 transcript_id = row["transcript_id"]
@@ -90,6 +92,7 @@ class ConstructSegments:
                         "transcript_id",
                     ]
                 }
+
                 if (
                     gene_id in genes
                     and transcript_id in genes[gene_id].transcripts
@@ -97,7 +100,7 @@ class ConstructSegments:
                     exon = Region(
                         region_type="exon",
                         chrom=row["seqname"],
-                        start=row["start"],
+                        start=row["start"] - 1,  # Convert to 0-based
                         end=row["end"],
                         strand=row["strand"],
                         attributes=exon_attributes,
@@ -350,8 +353,8 @@ class ConstructSegments:
                 for i in range(len(exons) - 1):
                     exon1 = exons[i]
                     exon2 = exons[i + 1]
-                    intron_start = exon1.end + 1
-                    intron_end = exon2.start - 1
+                    intron_start = exon1.end
+                    intron_end = exon2.start
 
                     if (
                         intron_start <= intron_end
@@ -398,7 +401,7 @@ class ConstructSegments:
 
             for start, end, _ in all_regions:
                 segment_boundaries.add(start)
-                segment_boundaries.add(end + 1)
+                segment_boundaries.add(end)
 
             gene_start = (
                 min(
@@ -452,13 +455,12 @@ class ConstructSegments:
                             else:
                                 terminal_exons_starts.add(region.start)
 
-            # Remove invalid terminal exon boundaries
             valid_segment_boundaries = set()
             for boundary in segment_boundaries:
                 if strand == "+":
                     if (
-                        boundary - 1 in terminal_exons_ends
-                        and boundary - 1 != gene_end
+                        boundary in terminal_exons_ends
+                        and boundary != gene_end
                     ):
                         continue  # Skip this boundary
                     else:
@@ -476,9 +478,10 @@ class ConstructSegments:
             segments = []
             for i in range(len(valid_segment_boundaries) - 1):
                 start = valid_segment_boundaries[i]
-                end = valid_segment_boundaries[i + 1] - 1
+                end = valid_segment_boundaries[
+                    i + 1
+                ]  # Note: no -1 to keep adjacent
 
-                # Prevent zero-length segments
                 if start < end:  # Only create segments if start < end
                     segments.append(
                         Region(
@@ -636,7 +639,7 @@ class ConstructSegments:
                                         region_type="subsegment",
                                         chrom=chrom,
                                         start=current_subsegment_start,
-                                        end=pas_start - 1,
+                                        end=pas_start,
                                         strand=strand,
                                         attributes={
                                             "gene_id": gene.gene_id,
@@ -648,7 +651,7 @@ class ConstructSegments:
                                     )
                                 )
 
-                            current_subsegment_start = pas_end + 1
+                            current_subsegment_start = pas_end  # No +1!
                             overlapping_pas.append(unique_pas_id)
 
                         if current_subsegment_start <= segment_end:
