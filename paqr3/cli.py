@@ -30,6 +30,13 @@ def main():
         help="Path to the PAS atlas BED file.",
     )
     parser.add_argument(
+        "--merge-distance",
+        "-md",
+        type=int,
+        default=5,
+        help="Merge PAS sites that are within this distance (in base pairs). Set to 0 to disable merging.",
+    )
+    parser.add_argument(
         "--coverage",
         "-c",
         type=str,
@@ -55,7 +62,7 @@ def main():
             f"PAQR3 v{__version__},"
             "(c) 2025 by Zavolab (zavolab-biozentrum@unibas.ch)"
         ),
-        help="show version information and exit",
+        help="Show version information and exit",
     )
 
     args = parser.parse_args()
@@ -69,6 +76,7 @@ def main():
         args.coverage[1],
         args.output_dir,
         args.downstream_exon_extension,
+        args.merge_distance,
     )
     paqr3_instance.run()
 

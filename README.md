@@ -38,6 +38,8 @@ options:
   -c, --coverage COVERAGE   Path to the coverage BigWig files. For every sample, a positive and negative stranded BW is required.
   -o, --output_dir OUTPUT_DIRECTORY
                         Path to the output directory.
+  -md, --merge-distance INT
+                        Merge PAS that are within this distance in base pairs (default: 5). Set to 0 to disable merging.
 ```
 
 Output Files
