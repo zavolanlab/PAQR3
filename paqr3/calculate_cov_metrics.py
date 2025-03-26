@@ -14,7 +14,7 @@ class CalculateCoverages:
         self.coverage_bw_neg = coverage_bw_neg
 
     def calculate_coverage_metrics(self, subsegments_df):
-        """Calculates mean coverage and sum of squared coverage values."""
+        """Calculates mean coverage and sum of squared values for each subsegment."""
 
         bw_pos = pyBigWig.open(self.coverage_bw_pos)
         bw_neg = pyBigWig.open(self.coverage_bw_neg)
@@ -22,11 +22,16 @@ class CalculateCoverages:
         results = []
 
         for _, row in subsegments_df.iterrows():
-            subsegment_id = f"{row['gene_unique_id']}.{row['segment_number']}.{row['subsegment_number']}"
+            gene_id = row["gene_unique_id"]
+            segment_number = row["segment_number"]
+            subsegment_number = row["subsegment_number"]
             chrom = row["chrom"]
             start = row["start"]
             end = row["end"]
             strand = row["strand"]
+
+            subsegment_id = f"{gene_id}.{segment_number}.{subsegment_number}"
+            segment_id = f"{gene_id}.{segment_number}"
 
             if strand == "+":
                 bw = bw_pos
@@ -35,28 +40,43 @@ class CalculateCoverages:
             else:
                 raise ValueError(f"Invalid strand: {strand}")
 
-            if start < end:
-                try:
-                    coverage = bw.values(chrom, start, end, numpy=True)
-                    coverage = np.nan_to_num(coverage, nan=0.0)
-                except ValueError:
-                    coverage = np.array([])
-            else:
+            try:
+                coverage = bw.values(chrom, start, end, numpy=True)
+                coverage = np.nan_to_num(coverage, nan=0.0)
+            except RuntimeError:
                 coverage = np.array([])
 
-            mean_coverage = np.nanmean(coverage) if len(coverage) > 0 else 0
+            mean_coverage = np.nanmean(coverage) if len(coverage) > 0 else 0.0
             sum_squared_values = (
-                np.nansum(coverage**2) if len(coverage) > 0 else 0
+                np.nansum(coverage**2) if len(coverage) > 0 else 0.0
             )
 
-            results.append([subsegment_id, mean_coverage, sum_squared_values])
+            pas_id = row.get("pas_id", ".")
+
+            results.append(
+                [
+                    gene_id,
+                    segment_id,
+                    subsegment_id,
+                    pas_id,
+                    mean_coverage,
+                    sum_squared_values,
+                ]
+            )
 
         bw_pos.close()
         bw_neg.close()
 
         results_df = pd.DataFrame(
             results,
-            columns=["subsegment_id", "mean_cov", "sum_squared_values"],
+            columns=[
+                "gene_id",
+                "segment_id",
+                "subsegment_id",
+                "pas_id",
+                "mean_cov",
+                "sum_squared_values",
+            ],
         )
         return results_df
 

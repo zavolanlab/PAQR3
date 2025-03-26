@@ -64,10 +64,10 @@ class PAQR3:
         output_subsegments_bed = os.path.join(
             output_dir, f"{sample_name}_subsegments.bed"
         )
-        output_coverage_tsv = os.path.join(
-            output_dir, f"{sample_name}_coverage.bed"
-        )
         output_pas_bed = os.path.join(output_dir, f"{sample_name}_PAS.bed")
+        output_coverage_tsv = os.path.join(
+            output_dir, f"{sample_name}_coverage.tsv"
+        )
 
         # Construct segments
         construct_segments = ConstructSegments(
