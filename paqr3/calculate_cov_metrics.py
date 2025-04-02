@@ -62,15 +62,23 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
             logging.info("DEBUG: " + msg)
         return None
 
-    best_f_stat = -np.inf
-    best_usage = None
-    best_monotonic = False
-    best_combo = None
-    best_drop_cov = []
-    best_drop_sum = 0.0
-    best_p_value = None
-    debug_summary = []
+    # Track best overall combination...
+    best_overall_f_stat = -np.inf
+    best_overall_usage = None
+    best_overall_combo = None
+    best_overall_drop_cov = []
+    best_overall_drop_sum = 0.0
+    best_overall_p_value = None
 
+    # ...and best among monotonic combinations.
+    best_mono_f_stat = -np.inf
+    best_mono_usage = None
+    best_mono_combo = None
+    best_mono_drop_cov = []
+    best_mono_drop_sum = 0.0
+    best_mono_p_value = None
+
+    debug_summary = []
     m = len(unique_pas_ids)
     # Iterate over all possible combinations of active/inactive for each PAS.
     for binary_pattern in itertools.product([0, 1], repeat=m):
@@ -191,33 +199,58 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
             }
         )
 
-        if f_stat > best_f_stat or (
-            f_stat == best_f_stat and is_monotonic and not best_monotonic
-        ):
-            best_f_stat = f_stat
-            best_usage = usage_dict
-            best_monotonic = is_monotonic
-            best_combo = binary_pattern
-            best_drop_cov = drop_list
-            best_drop_sum = drop_sum
-            best_p_value = p_value
+        # Update best overall combination.
+        if f_stat > best_overall_f_stat:
+            best_overall_f_stat = f_stat
+            best_overall_usage = usage_dict
+            best_overall_combo = binary_pattern
+            best_overall_drop_cov = drop_list
+            best_overall_drop_sum = drop_sum
+            best_overall_p_value = p_value
 
-    if best_usage is None:
-        best_usage = {pid: 0.0 for pid in unique_pas_ids}
+        # Update best monotonic combination.
+        if is_monotonic and f_stat > best_mono_f_stat:
+            best_mono_f_stat = f_stat
+            best_mono_usage = usage_dict
+            best_mono_combo = binary_pattern
+            best_mono_drop_cov = drop_list
+            best_mono_drop_sum = drop_sum
+            best_mono_p_value = p_value
+
+    # At the end, if any monotonic combination was found, choose that one.
+    if best_mono_combo is not None:
+        chosen_combo = best_mono_combo
+        chosen_usage = best_mono_usage
+        chosen_f_stat = best_mono_f_stat
+        chosen_drop_cov = best_mono_drop_cov
+        chosen_drop_sum = best_mono_drop_sum
+        chosen_p_value = best_mono_p_value
+        chosen_monotone = 1
+    else:
+        chosen_combo = best_overall_combo
+        chosen_usage = best_overall_usage
+        chosen_f_stat = best_overall_f_stat
+        chosen_drop_cov = best_overall_drop_cov
+        chosen_drop_sum = best_overall_drop_sum
+        chosen_p_value = best_overall_p_value
+        chosen_monotone = 0
+
+    if best_overall_usage is None:
+        chosen_usage = {pid: 0.0 for pid in unique_pas_ids}
 
     if debug:
         logging.info(
-            f"DEBUG: Segment {segment_id} best combo: {best_combo}, best usage: {best_usage}, f_stat: {best_f_stat}, p_value: {best_p_value}"
+            f"DEBUG: Segment {segment_id} best combo: {chosen_combo}, best usage: {chosen_usage}, f_stat: {chosen_f_stat}, p_value: {chosen_p_value}"
         )
 
     return {
-        "pas_usage": best_usage,
-        "rna_monotone": int(best_monotonic),
-        "f_stat": best_f_stat,
-        "p_value": best_p_value,
-        "used_combination": best_combo,
-        "rna_drop_cov": best_drop_cov,
-        "rna_sum_drop_cov": best_drop_sum,
+        "pas_usage": chosen_usage,
+        "rna_monotone": int(chosen_monotone),
+        "f_stat": chosen_f_stat,
+        "p_value": chosen_p_value,
+        "used_combination": chosen_combo,
+        "rna_drop_cov": chosen_drop_cov,
+        "rna_sum_drop_cov": chosen_drop_sum,
         "debug_info": debug_summary,
     }
 
@@ -261,7 +294,6 @@ class CalculateCoverages:
         all_rows = []
         for _, row in subsegments_df.iterrows():
             gene_id = row["gene_unique_id"]
-            # Use the input to compute segment_id and subsegment_id.
             seg_num = row["segment_number"]
             subseg_num = row["subsegment_number"]
             chrom = row["chrom"]
@@ -296,7 +328,6 @@ class CalculateCoverages:
                     "pas_id": pas_id,
                     "mean_cov": mean_cov,
                     "sum_squared_values": sum_squared,
-                    # We no longer keep "segment_number" as it's not needed in the output.
                     "coverage": coverage,  # Keep raw coverage for downstream calculations.
                 }
             )
@@ -398,7 +429,7 @@ class CalculateCoverages:
     ):
         log_message("Step 1: Calculating initial coverage metrics...")
         raw_cov_df = self.calculate_coverage_metrics(subsegments_df)
-        # For _coverage.tsv output, compute extra columns based on precomputed means.
+        # For _coverage.tsv output, compute extra columns using compute_drops_and_usage.
         cov_df = raw_cov_df.groupby(
             ["gene_id", "segment_id"], group_keys=False
         ).apply(compute_drops_and_usage)
