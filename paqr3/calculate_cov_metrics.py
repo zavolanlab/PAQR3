@@ -11,19 +11,30 @@ def log_message(message):
     logging.info(message)
 
 
+def json_serial(obj):
+    """JSON serializer for objects not serializable by default JSON code"""
+    if isinstance(obj, (np.float32, np.float64)):
+        return float(obj)
+    if isinstance(obj, (np.int32, np.int64)):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"Type {type(obj)} not serializable")
+
+
 def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
-    # Use logging.info as a default logger; also use logging.info for detailed messages.
-    log = (
-        logging.info if debug is False else logging.info
-    )  # We always log info messages
-    # (But we'll add debug messages with logging.info below.)
+    log = logging.info
 
-    mean_covs = [s["mean_cov"] for s in subsegments]
+    # Retrieve the raw coverage arrays and PAS IDs.
+    coverage_arrays = [s["coverage"] for s in subsegments]
     pas_ids = [str(s["pas_id"]) for s in subsegments]
+    computed_means = [
+        np.mean(cov) if len(cov) > 0 else 0.0 for cov in coverage_arrays
+    ]
 
-    # Early exit if all coverages are zero.
-    if all(mu == 0 for mu in mean_covs):
-        msg = f"[{segment_id}] All subsegment mean coverages are 0 → Assign usage = 0 to all PAS"
+    # Early exit if all coverage arrays are zero.
+    if all(mu == 0 for mu in computed_means):
+        msg = f"[{segment_id}] All subsegment coverages are 0 → Assign usage = 0 to all PAS"
         log(msg)
         if debug:
             logging.info("DEBUG: " + msg)
@@ -72,8 +83,7 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
             if flag == 1
         ]
 
-        # Modified grouping: when an active PAS is encountered, include the current subsegment
-        # in the current group before splitting.
+        # Grouping: when an active PAS is encountered, include the current subsegment then split.
         groups = []
         current_group = []
         current_pas_idx = 0
@@ -91,52 +101,48 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
         if current_group:
             groups.append(current_group)
 
-        # Compute group means.
+        # Recalculate group means from the raw coverage values.
         group_means = [
-            np.mean([mean_covs[i] for i in group]) if group else 0.0
+            (
+                np.mean(np.concatenate([coverage_arrays[i] for i in group]))
+                if group
+                else 0.0
+            )
             for group in groups
         ]
-
-        # One-way ANOVA: compute F-statistic across groups.
-        all_covs = []
-        labels = []
-        for idx, group in enumerate(groups):
-            for i in group:
-                all_covs.append(mean_covs[i])
-                labels.append(idx)
-        if len(set(labels)) > 1:
-            group_means_array = [
-                np.mean([c for j, c in enumerate(all_covs) if labels[j] == g])
-                for g in sorted(set(labels))
+        all_covs = np.concatenate(
+            [
+                np.concatenate([coverage_arrays[i] for i in group])
+                for group in groups
             ]
-            overall_mean = np.mean(all_covs)
-            ss_between = sum(
-                len([1 for j in labels if j == g]) * (gm - overall_mean) ** 2
-                for g, gm in enumerate(group_means_array)
+        )
+        overall_mean = np.mean(all_covs)
+
+        ss_between = sum(
+            len(np.concatenate([coverage_arrays[i] for i in group]))
+            * (gm - overall_mean) ** 2
+            for group, gm in zip(groups, group_means)
+        )
+        ss_within = sum(
+            np.sum(
+                (np.concatenate([coverage_arrays[i] for i in group]) - gm) ** 2
             )
-            ss_within = sum(
-                (all_covs[i] - group_means_array[labels[i]]) ** 2
-                for i in range(len(all_covs))
-            )
-            df_between = len(set(labels)) - 1
-            df_within = len(all_covs) - len(set(labels))
-            if df_within == 0 or ss_within == 0:
-                f_stat = 0.0
-                p_value = None
-            else:
-                f_stat = (ss_between / df_between) / (ss_within / df_within)
-                p_value = 1 - f.cdf(f_stat, df_between, df_within)
-        else:
+            for group, gm in zip(groups, group_means)
+        )
+        df_between = len(groups) - 1
+        df_within = len(all_covs) - len(groups)
+        if df_within == 0 or ss_within == 0:
             f_stat = 0.0
             p_value = None
+        else:
+            f_stat = (ss_between / df_between) / (ss_within / df_within)
+            p_value = 1 - f.cdf(f_stat, df_between, df_within)
 
-        # Check monotonicity.
         is_monotonic = all(
             group_means[i] >= group_means[i + 1]
             for i in range(len(group_means) - 1)
         )
 
-        # Always compute drop_list from the groups.
         if len(groups) >= 2:
             drop_list = [
                 group_means[i] - group_means[i + 1]
@@ -166,7 +172,6 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
             if flag == 1
         }
 
-        # Log debug info for this combination.
         if debug:
             logging.info(
                 f"DEBUG: Segment {segment_id} combo {binary_pattern}: f_stat={f_stat}, p_value={p_value}, group_means={group_means}, drop_list={drop_list}, usage={usage_dict}"
@@ -186,7 +191,6 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
             }
         )
 
-        # Choose the best combination.
         if f_stat > best_f_stat or (
             f_stat == best_f_stat and is_monotonic and not best_monotonic
         ):
@@ -218,6 +222,33 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
     }
 
 
+def compute_drops_and_usage(group):
+    """Compute rna_drop_cov, rna_sum_drop_cov, rna_monotone, and rna_usage based on precomputed mean_cov values."""
+    group = group.sort_values("subsegment_id")
+    mean_covs = group["mean_cov"].values
+    pas_ids = group["pas_id"].astype(str).values
+
+    drops = [
+        mean_covs[i] - mean_covs[i + 1] for i in range(len(mean_covs) - 1)
+    ]
+    drops.append(0.0)
+    sum_drops = sum(drops)
+
+    rna_usage = [
+        (drop / sum_drops if sum_drops > 0 else 0.0) if pid != "." else None
+        for drop, pid in zip(drops, pas_ids)
+    ]
+
+    group["rna_drop_cov"] = drops
+    group["rna_sum_drop_cov"] = sum_drops
+    group["rna_monotone"] = (
+        int(all(d > 0 for d in drops[:-1])) if sum_drops > 0 else 1
+    )
+    group["rna_usage"] = rna_usage
+
+    return group
+
+
 class CalculateCoverages:
     def __init__(self, coverage_bw_pos, coverage_bw_neg):
         self.coverage_bw_pos = coverage_bw_pos
@@ -230,15 +261,16 @@ class CalculateCoverages:
         all_rows = []
         for _, row in subsegments_df.iterrows():
             gene_id = row["gene_unique_id"]
-            segment_number = row["segment_number"]
-            subsegment_number = row["subsegment_number"]
+            # Use the input to compute segment_id and subsegment_id.
+            seg_num = row["segment_number"]
+            subseg_num = row["subsegment_number"]
             chrom = row["chrom"]
             start = row["start"]
             end = row["end"]
             strand = row["strand"]
             pas_id = row.get("pas_id", ".")
-            subsegment_id = f"{gene_id}.{segment_number}.{subsegment_number}"
-            segment_id = f"{gene_id}.{segment_number}"
+            segment_id = f"{gene_id}.{seg_num}"
+            subsegment_id = f"{gene_id}.{seg_num}.{subseg_num}"
 
             if strand == "+":
                 bw = bw_pos
@@ -264,7 +296,8 @@ class CalculateCoverages:
                     "pas_id": pas_id,
                     "mean_cov": mean_cov,
                     "sum_squared_values": sum_squared,
-                    "segment_number": segment_number,
+                    # We no longer keep "segment_number" as it's not needed in the output.
+                    "coverage": coverage,  # Keep raw coverage for downstream calculations.
                 }
             )
 
@@ -272,52 +305,14 @@ class CalculateCoverages:
         bw_neg.close()
 
         df = pd.DataFrame(all_rows)
-
-        def compute_drops_and_usage(group):
-            group = group.sort_values("subsegment_id")
-            mean_covs = group["mean_cov"].values
-            pas_ids = group["pas_id"].astype(str).values
-
-            drops = [
-                mean_covs[i] - mean_covs[i + 1]
-                for i in range(len(mean_covs) - 1)
-            ]
-            drops.append(0.0)
-            sum_drops = sum(drops)
-
-            rna_usage = [
-                (
-                    (drop / sum_drops)
-                    if pid != "." and sum_drops > 0
-                    else (None if pid == "." else 0.0)
-                )
-                for drop, pid in zip(drops, pas_ids)
-            ]
-
-            group["rna_drop_cov"] = drops
-            group["rna_sum_drop_cov"] = sum_drops
-            group["rna_monotone"] = (
-                int(all(d > 0 for d in drops[:-1])) if sum_drops > 0 else 1
-            )
-            group["rna_usage"] = rna_usage
-
-            return group
-
-        df = df.groupby(["gene_id", "segment_id"], group_keys=False).apply(
-            compute_drops_and_usage
-        )
-        df = df.drop(columns=["segment_number"])
-
         return df
 
     def evaluate_pas_usage_models(self, raw_cov_df, output_tsv_debug=None):
         usage_rows = []
         debug_rows = []
-        # Use sort=False to preserve the original order.
         grouped = raw_cov_df.groupby("segment_id", sort=False)
         for segment_id, group in grouped:
-            if output_tsv_debug:
-                logging.info(f"DEBUG: Evaluating segment {segment_id}")
+            logging.info(f"DEBUG: Evaluating segment {segment_id}")
             subsegments = group.to_dict("records")
             result = evaluate_all_pas_usage_patterns(
                 subsegments, segment_id, debug=True
@@ -359,7 +354,6 @@ class CalculateCoverages:
                             }
                         )
                         break
-            # Append debug information for the current segment.
             debug_rows.append(
                 {
                     "segment_id": segment_id,
@@ -369,9 +363,8 @@ class CalculateCoverages:
             )
         if output_tsv_debug:
             with open(output_tsv_debug, "w") as f:
-                json.dump(debug_rows, f, indent=4)
+                json.dump(debug_rows, f, indent=4, default=json_serial)
         usage_df = pd.DataFrame(usage_rows)
-        # Reorder columns to match _coverage.tsv (with f_stat and p_value appended at the end).
         ordered_columns = [
             "gene_id",
             "segment_id",
@@ -390,6 +383,9 @@ class CalculateCoverages:
         return usage_df
 
     def write_coverage_results(self, results_df, output_tsv):
+        # Drop "coverage" column before writing output.
+        if "coverage" in results_df.columns:
+            results_df = results_df.drop(columns=["coverage"])
         results_df.to_csv(output_tsv, sep="\t", index=False)
         log_message(f"Results written to {output_tsv}")
 
@@ -402,7 +398,11 @@ class CalculateCoverages:
     ):
         log_message("Step 1: Calculating initial coverage metrics...")
         raw_cov_df = self.calculate_coverage_metrics(subsegments_df)
-        self.write_coverage_results(raw_cov_df, output_raw_tsv)
+        # For _coverage.tsv output, compute extra columns based on precomputed means.
+        cov_df = raw_cov_df.groupby(
+            ["gene_id", "segment_id"], group_keys=False
+        ).apply(compute_drops_and_usage)
+        self.write_coverage_results(cov_df.copy(), output_raw_tsv)
 
         log_message("Step 2: Evaluating PAS usage models via F-statistics...")
         refined_usage_df = self.evaluate_pas_usage_models(
