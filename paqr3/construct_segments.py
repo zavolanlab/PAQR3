@@ -595,6 +595,7 @@ class ConstructSegments:
         """
         Identifies PAS sites overlapping with segments and constructs subsegments.
         Each subsegment is assigned the PAS it follows (strand-aware).
+        Only include PAS that fully overlap the segment.
         """
         log_message(
             "Identifying PAS overlaps with segments and constructing subsegments..."
@@ -611,11 +612,19 @@ class ConstructSegments:
                 subsegments = []
 
                 if (chrom, strand) in pas_trees:
+                    # Get all intervals that overlap the segment
                     overlapping_intervals = pas_trees[(chrom, strand)][
                         segment_start:segment_end
                     ]
+                    # Filter to include only PAS that are fully contained within the segment boundaries
                     sorted_intervals = sorted(
-                        overlapping_intervals, key=lambda x: x.begin
+                        [
+                            interval
+                            for interval in overlapping_intervals
+                            if interval.begin >= segment_start
+                            and interval.end <= segment_end
+                        ],
+                        key=lambda x: x.begin,
                     )
 
                     current_subsegment_start = segment_start
