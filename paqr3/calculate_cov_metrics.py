@@ -62,7 +62,7 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
             logging.info("DEBUG: " + msg)
         return None
 
-    # Track best overall combination...
+    # We'll track best overall and best monotonic combinations.
     best_overall_f_stat = -np.inf
     best_overall_usage = None
     best_overall_combo = None
@@ -70,7 +70,6 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
     best_overall_drop_sum = 0.0
     best_overall_p_value = None
 
-    # ...and best among monotonic combinations.
     best_mono_f_stat = -np.inf
     best_mono_usage = None
     best_mono_combo = None
@@ -150,16 +149,19 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
             group_means[i] >= group_means[i + 1]
             for i in range(len(group_means) - 1)
         )
-
-        if len(groups) >= 2:
-            drop_list = [
+        # Enforce that if there is no drop, monotonicity must be false.
+        drop_list = (
+            [
                 group_means[i] - group_means[i + 1]
                 for i in range(len(groups) - 1)
             ]
-        else:
-            drop_list = [group_means[0]]
+            if len(groups) >= 2
+            else [group_means[0]]
+        )
         drop_list.append(0.0)
         drop_sum = sum(drop_list)
+        if drop_sum == 0:
+            is_monotonic = False
 
         usage_values = []
         drop_idx = 0
@@ -217,7 +219,6 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
             best_mono_drop_sum = drop_sum
             best_mono_p_value = p_value
 
-    # At the end, if any monotonic combination was found, choose that one.
     if best_mono_combo is not None:
         chosen_combo = best_mono_combo
         chosen_usage = best_mono_usage
@@ -266,6 +267,8 @@ def compute_drops_and_usage(group):
     ]
     drops.append(0.0)
     sum_drops = sum(drops)
+    # If there is no drop, force monotonicity to 0.
+    mono = int(all(d > 0 for d in drops[:-1])) if sum_drops > 0 else 0
 
     rna_usage = [
         (drop / sum_drops if sum_drops > 0 else 0.0) if pid != "." else None
@@ -274,9 +277,7 @@ def compute_drops_and_usage(group):
 
     group["rna_drop_cov"] = drops
     group["rna_sum_drop_cov"] = sum_drops
-    group["rna_monotone"] = (
-        int(all(d > 0 for d in drops[:-1])) if sum_drops > 0 else 1
-    )
+    group["rna_monotone"] = mono
     group["rna_usage"] = rna_usage
 
     return group
