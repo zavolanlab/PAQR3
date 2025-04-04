@@ -7,6 +7,7 @@ import json
 from scipy.stats import f  # type: ignore
 import time
 import concurrent.futures
+from functools import partial
 
 
 def log_message(message):
@@ -138,7 +139,7 @@ def evaluate_all_pas_usage_patterns(
                 for i in range(len(group_means) - 1)
             )
         if not is_monotonic:
-            continue
+            continue  # Skip combinations that are not monotonic
 
         # For monotonic combinations, compute F-statistics
         all_covs = np.concatenate(
@@ -217,154 +218,15 @@ def evaluate_all_pas_usage_patterns(
                 "rna_monotone": 1,
             }
 
-    if best_mono is not None:
-        chosen = best_mono
-    else:
-        # Phase 2: Fallback to evaluating all combinations if no monotonic candidate was found.
-        best_overall_f_stat = -np.inf
-        best_overall = None
-        for binary_pattern in itertools.product([0, 1], repeat=m):
-            if sum(binary_pattern) == 0:
-                continue
+    # If no monotonic combination was found, skip this segment.
+    if best_mono is None:
+        msg = f"[{segment_id}] No monotonic PAS combinations found; skipping segment."
+        log(msg)
+        if debug:
+            logging.info("DEBUG: " + msg)
+        return None
 
-            used_pas = [
-                pid
-                for pid, flag in zip(unique_pas_ids, binary_pattern)
-                if flag == 1
-            ]
-
-            groups = []
-            current_group = []
-            current_pas_idx = 0
-            for i, pid in enumerate(pas_ids):
-                if pid == ".":
-                    current_group.append(i)
-                else:
-                    if unique_pas_ids[current_pas_idx] in used_pas:
-                        current_group.append(i)
-                        groups.append(current_group)
-                        current_group = []
-                    else:
-                        current_group.append(i)
-                    current_pas_idx += 1
-            if current_group:
-                groups.append(current_group)
-
-            group_means = [
-                (
-                    np.mean(
-                        np.concatenate([coverage_arrays[i] for i in group])
-                    )
-                    if group
-                    else 0.0
-                )
-                for group in groups
-            ]
-            all_covs = np.concatenate(
-                [
-                    np.concatenate([coverage_arrays[i] for i in group])
-                    for group in groups
-                ]
-            )
-            overall_mean = np.mean(all_covs)
-            ss_between = sum(
-                len(np.concatenate([coverage_arrays[i] for i in group]))
-                * (gm - overall_mean) ** 2
-                for group, gm in zip(groups, group_means)
-            )
-            ss_within = sum(
-                np.sum(
-                    (np.concatenate([coverage_arrays[i] for i in group]) - gm)
-                    ** 2
-                )
-                for group, gm in zip(groups, group_means)
-            )
-            df_between = len(groups) - 1
-            df_within = len(all_covs) - len(groups)
-            if df_within == 0 or ss_within == 0:
-                f_stat = 0.0
-                p_value = None
-            else:
-                f_stat = (ss_between / df_between) / (ss_within / df_within)
-                p_value = 1 - f.cdf(f_stat, df_between, df_within)
-
-            if len(group_means) >= 2:
-                drop_list = [
-                    group_means[i] - group_means[i + 1]
-                    for i in range(len(group_means) - 1)
-                ]
-            else:
-                drop_list = [group_means[0]]
-            drop_list.append(0.0)
-            drop_sum = sum(drop_list)
-            usage_values = []
-            drop_idx = 0
-            for flag in binary_pattern:
-                if flag == 1:
-                    usage_values.append(
-                        (drop_list[drop_idx] / drop_sum)
-                        if drop_sum > 0
-                        else 0.0
-                    )
-                    drop_idx += 1
-                else:
-                    usage_values.append(0.0)
-            usage_dict = {
-                pid: u
-                for pid, u, flag in zip(
-                    unique_pas_ids, usage_values, binary_pattern
-                )
-                if flag == 1
-            }
-            debug_info = {
-                "combo": binary_pattern,
-                "f_stat": f_stat,
-                "p_value": p_value,
-                "group_means": group_means,
-                "monotonic": False,
-                "groups": groups,
-                "usage": usage_dict,
-                "drop_list": drop_list,
-                "drop_sum": drop_sum,
-            }
-            if debug:
-                logging.info(
-                    f"DEBUG: Segment {segment_id} fallback combo {binary_pattern}: f_stat={f_stat}, p_value={p_value}, "
-                    f"group_means={group_means}, drop_list={drop_list}, usage={usage_dict}"
-                )
-            if f_stat > best_overall_f_stat:
-                best_overall_f_stat = f_stat
-                best_overall = {
-                    "pas_usage": usage_dict,
-                    "f_stat": f_stat,
-                    "p_value": p_value,
-                    "used_combination": binary_pattern,
-                    "rna_drop_cov": drop_list,
-                    "rna_sum_drop_cov": drop_sum,
-                    "debug_info": debug_info,
-                    "rna_monotone": 0,
-                }
-        chosen = (
-            best_overall
-            if best_overall is not None
-            else {
-                "pas_usage": {pid: 0.0 for pid in unique_pas_ids},
-                "rna_monotone": 0,
-                "f_stat": 0.0,
-                "p_value": None,
-                "used_combination": "none",
-                "rna_drop_cov": [0.0] * len(subsegments),
-                "rna_sum_drop_cov": 0.0,
-                "debug_info": "No valid combination found.",
-            }
-        )
-
-    if debug:
-        logging.info(
-            f"DEBUG: Segment {segment_id} chosen combo: {chosen.get('used_combination', 'none')}, "
-            f"best usage: {chosen.get('pas_usage', {})}, f_stat: {chosen.get('f_stat')}, p_value: {chosen.get('p_value')}"
-        )
-    return chosen
+    return best_mono
 
 
 def compute_drops_and_usage(group):
@@ -468,12 +330,10 @@ class CalculateCoverages:
             with concurrent.futures.ProcessPoolExecutor(
                 max_workers=n_procs
             ) as executor:
-                results = executor.map(
-                    lambda tup: process_segment(
-                        tup, debug=True, max_pas_count=max_pas_count
-                    ),
-                    grouped,
+                process_func = partial(
+                    process_segment, debug=True, max_pas_count=max_pas_count
                 )
+                results = executor.map(process_func, grouped)
                 for segment_id, subsegments, result in results:
                     if result is None:
                         continue
