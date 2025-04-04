@@ -5,6 +5,8 @@ import numpy as np
 import itertools
 import json
 from scipy.stats import f  # type: ignore
+import time
+import concurrent.futures
 
 
 def log_message(message):
@@ -22,7 +24,9 @@ def json_serial(obj):
     raise TypeError(f"Type {type(obj)} not serializable")
 
 
-def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
+def evaluate_all_pas_usage_patterns(
+    subsegments, segment_id, debug=True, max_pas_count=10
+):
     log = logging.info
 
     # Retrieve the raw coverage arrays and PAS IDs.
@@ -51,6 +55,18 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
         }
 
     unique_pas_ids = [pid for pid in pas_ids if pid != "."]
+
+    # New check: only evaluate segments with max_pas_count or fewer PAS
+    if len(unique_pas_ids) > max_pas_count:
+        msg = (
+            f"[{segment_id}] Too many PAS ({len(unique_pas_ids)}) in this segment; "
+            f"only segments with {max_pas_count} or fewer PAS are evaluated. Skipping."
+        )
+        log(msg)
+        if debug:
+            logging.info("DEBUG: " + msg)
+        return None
+
     if debug:
         logging.info(
             f"DEBUG: Processing segment {segment_id} with PAS: {unique_pas_ids}"
@@ -62,24 +78,11 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
             logging.info("DEBUG: " + msg)
         return None
 
-    # We'll track best overall and best monotonic combinations.
-    best_overall_f_stat = -np.inf
-    best_overall_usage = None
-    best_overall_combo = None
-    best_overall_drop_cov = []
-    best_overall_drop_sum = 0.0
-    best_overall_p_value = None
-
+    best_mono = None  # best monotonic candidate info
     best_mono_f_stat = -np.inf
-    best_mono_usage = None
-    best_mono_combo = None
-    best_mono_drop_cov = []
-    best_mono_drop_sum = 0.0
-    best_mono_p_value = None
 
-    debug_summary = []
     m = len(unique_pas_ids)
-    # Iterate over all possible combinations of active/inactive for each PAS.
+    # Phase 1: Evaluate only monotonic combinations
     for binary_pattern in itertools.product([0, 1], repeat=m):
         if sum(binary_pattern) == 0:
             continue
@@ -90,7 +93,7 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
             if flag == 1
         ]
 
-        # Grouping: when an active PAS is encountered, include the current subsegment then split.
+        # Create groups: when an active PAS is encountered, include the current subsegment then split.
         groups = []
         current_group = []
         current_pas_idx = 0
@@ -117,6 +120,27 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
             )
             for group in groups
         ]
+        # Compute drop_list and drop_sum
+        if len(group_means) >= 2:
+            drop_list = [
+                group_means[i] - group_means[i + 1]
+                for i in range(len(group_means) - 1)
+            ]
+        else:
+            drop_list = [group_means[0]]
+        drop_list.append(0.0)
+        drop_sum = sum(drop_list)
+        # Check monotonicity (if drop_sum > 0, then check if non-increasing)
+        is_monotonic = False
+        if drop_sum > 0:
+            is_monotonic = all(
+                group_means[i] >= group_means[i + 1]
+                for i in range(len(group_means) - 1)
+            )
+        if not is_monotonic:
+            continue
+
+        # For monotonic combinations, compute F-statistics
         all_covs = np.concatenate(
             [
                 np.concatenate([coverage_arrays[i] for i in group])
@@ -124,7 +148,6 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
             ]
         )
         overall_mean = np.mean(all_covs)
-
         ss_between = sum(
             len(np.concatenate([coverage_arrays[i] for i in group]))
             * (gm - overall_mean) ** 2
@@ -145,24 +168,6 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
             f_stat = (ss_between / df_between) / (ss_within / df_within)
             p_value = 1 - f.cdf(f_stat, df_between, df_within)
 
-        is_monotonic = all(
-            group_means[i] >= group_means[i + 1]
-            for i in range(len(group_means) - 1)
-        )
-        # Enforce that if there is no drop, monotonicity must be false.
-        drop_list = (
-            [
-                group_means[i] - group_means[i + 1]
-                for i in range(len(groups) - 1)
-            ]
-            if len(groups) >= 2
-            else [group_means[0]]
-        )
-        drop_list.append(0.0)
-        drop_sum = sum(drop_list)
-        if drop_sum == 0:
-            is_monotonic = False
-
         usage_values = []
         drop_idx = 0
         for flag in binary_pattern:
@@ -173,7 +178,6 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
                 drop_idx += 1
             else:
                 usage_values.append(0.0)
-
         usage_dict = {
             pid: u
             for pid, u, flag in zip(
@@ -182,78 +186,185 @@ def evaluate_all_pas_usage_patterns(subsegments, segment_id, debug=True):
             if flag == 1
         }
 
+        debug_info = {
+            "combo": binary_pattern,
+            "f_stat": f_stat,
+            "p_value": p_value,
+            "group_means": group_means,
+            "monotonic": True,
+            "groups": groups,
+            "usage": usage_dict,
+            "drop_list": drop_list,
+            "drop_sum": drop_sum,
+        }
+
         if debug:
             logging.info(
-                f"DEBUG: Segment {segment_id} combo {binary_pattern}: f_stat={f_stat}, p_value={p_value}, group_means={group_means}, drop_list={drop_list}, usage={usage_dict}"
+                f"DEBUG: Segment {segment_id} monotonic combo {binary_pattern}: f_stat={f_stat}, p_value={p_value}, "
+                f"group_means={group_means}, drop_list={drop_list}, usage={usage_dict}"
             )
 
-        debug_summary.append(
-            {
+        if f_stat > best_mono_f_stat:
+            best_mono_f_stat = f_stat
+            best_mono = {
+                "pas_usage": usage_dict,
+                "f_stat": f_stat,
+                "p_value": p_value,
+                "used_combination": binary_pattern,
+                "rna_drop_cov": drop_list,
+                "rna_sum_drop_cov": drop_sum,
+                "debug_info": debug_info,
+                "rna_monotone": 1,
+            }
+
+    if best_mono is not None:
+        chosen = best_mono
+    else:
+        # Phase 2: Fallback to evaluating all combinations if no monotonic candidate was found.
+        best_overall_f_stat = -np.inf
+        best_overall = None
+        for binary_pattern in itertools.product([0, 1], repeat=m):
+            if sum(binary_pattern) == 0:
+                continue
+
+            used_pas = [
+                pid
+                for pid, flag in zip(unique_pas_ids, binary_pattern)
+                if flag == 1
+            ]
+
+            groups = []
+            current_group = []
+            current_pas_idx = 0
+            for i, pid in enumerate(pas_ids):
+                if pid == ".":
+                    current_group.append(i)
+                else:
+                    if unique_pas_ids[current_pas_idx] in used_pas:
+                        current_group.append(i)
+                        groups.append(current_group)
+                        current_group = []
+                    else:
+                        current_group.append(i)
+                    current_pas_idx += 1
+            if current_group:
+                groups.append(current_group)
+
+            group_means = [
+                (
+                    np.mean(
+                        np.concatenate([coverage_arrays[i] for i in group])
+                    )
+                    if group
+                    else 0.0
+                )
+                for group in groups
+            ]
+            all_covs = np.concatenate(
+                [
+                    np.concatenate([coverage_arrays[i] for i in group])
+                    for group in groups
+                ]
+            )
+            overall_mean = np.mean(all_covs)
+            ss_between = sum(
+                len(np.concatenate([coverage_arrays[i] for i in group]))
+                * (gm - overall_mean) ** 2
+                for group, gm in zip(groups, group_means)
+            )
+            ss_within = sum(
+                np.sum(
+                    (np.concatenate([coverage_arrays[i] for i in group]) - gm)
+                    ** 2
+                )
+                for group, gm in zip(groups, group_means)
+            )
+            df_between = len(groups) - 1
+            df_within = len(all_covs) - len(groups)
+            if df_within == 0 or ss_within == 0:
+                f_stat = 0.0
+                p_value = None
+            else:
+                f_stat = (ss_between / df_between) / (ss_within / df_within)
+                p_value = 1 - f.cdf(f_stat, df_between, df_within)
+
+            if len(group_means) >= 2:
+                drop_list = [
+                    group_means[i] - group_means[i + 1]
+                    for i in range(len(group_means) - 1)
+                ]
+            else:
+                drop_list = [group_means[0]]
+            drop_list.append(0.0)
+            drop_sum = sum(drop_list)
+            usage_values = []
+            drop_idx = 0
+            for flag in binary_pattern:
+                if flag == 1:
+                    usage_values.append(
+                        (drop_list[drop_idx] / drop_sum)
+                        if drop_sum > 0
+                        else 0.0
+                    )
+                    drop_idx += 1
+                else:
+                    usage_values.append(0.0)
+            usage_dict = {
+                pid: u
+                for pid, u, flag in zip(
+                    unique_pas_ids, usage_values, binary_pattern
+                )
+                if flag == 1
+            }
+            debug_info = {
                 "combo": binary_pattern,
                 "f_stat": f_stat,
                 "p_value": p_value,
                 "group_means": group_means,
-                "monotonic": is_monotonic,
+                "monotonic": False,
                 "groups": groups,
                 "usage": usage_dict,
                 "drop_list": drop_list,
                 "drop_sum": drop_sum,
             }
+            if debug:
+                logging.info(
+                    f"DEBUG: Segment {segment_id} fallback combo {binary_pattern}: f_stat={f_stat}, p_value={p_value}, "
+                    f"group_means={group_means}, drop_list={drop_list}, usage={usage_dict}"
+                )
+            if f_stat > best_overall_f_stat:
+                best_overall_f_stat = f_stat
+                best_overall = {
+                    "pas_usage": usage_dict,
+                    "f_stat": f_stat,
+                    "p_value": p_value,
+                    "used_combination": binary_pattern,
+                    "rna_drop_cov": drop_list,
+                    "rna_sum_drop_cov": drop_sum,
+                    "debug_info": debug_info,
+                    "rna_monotone": 0,
+                }
+        chosen = (
+            best_overall
+            if best_overall is not None
+            else {
+                "pas_usage": {pid: 0.0 for pid in unique_pas_ids},
+                "rna_monotone": 0,
+                "f_stat": 0.0,
+                "p_value": None,
+                "used_combination": "none",
+                "rna_drop_cov": [0.0] * len(subsegments),
+                "rna_sum_drop_cov": 0.0,
+                "debug_info": "No valid combination found.",
+            }
         )
-
-        # Update best overall combination.
-        if f_stat > best_overall_f_stat:
-            best_overall_f_stat = f_stat
-            best_overall_usage = usage_dict
-            best_overall_combo = binary_pattern
-            best_overall_drop_cov = drop_list
-            best_overall_drop_sum = drop_sum
-            best_overall_p_value = p_value
-
-        # Update best monotonic combination.
-        if is_monotonic and f_stat > best_mono_f_stat:
-            best_mono_f_stat = f_stat
-            best_mono_usage = usage_dict
-            best_mono_combo = binary_pattern
-            best_mono_drop_cov = drop_list
-            best_mono_drop_sum = drop_sum
-            best_mono_p_value = p_value
-
-    if best_mono_combo is not None:
-        chosen_combo = best_mono_combo
-        chosen_usage = best_mono_usage
-        chosen_f_stat = best_mono_f_stat
-        chosen_drop_cov = best_mono_drop_cov
-        chosen_drop_sum = best_mono_drop_sum
-        chosen_p_value = best_mono_p_value
-        chosen_monotone = 1
-    else:
-        chosen_combo = best_overall_combo
-        chosen_usage = best_overall_usage
-        chosen_f_stat = best_overall_f_stat
-        chosen_drop_cov = best_overall_drop_cov
-        chosen_drop_sum = best_overall_drop_sum
-        chosen_p_value = best_overall_p_value
-        chosen_monotone = 0
-
-    if best_overall_usage is None:
-        chosen_usage = {pid: 0.0 for pid in unique_pas_ids}
 
     if debug:
         logging.info(
-            f"DEBUG: Segment {segment_id} best combo: {chosen_combo}, best usage: {chosen_usage}, f_stat: {chosen_f_stat}, p_value: {chosen_p_value}"
+            f"DEBUG: Segment {segment_id} chosen combo: {chosen.get('used_combination', 'none')}, "
+            f"best usage: {chosen.get('pas_usage', {})}, f_stat: {chosen.get('f_stat')}, p_value: {chosen.get('p_value')}"
         )
-
-    return {
-        "pas_usage": chosen_usage,
-        "rna_monotone": int(chosen_monotone),
-        "f_stat": chosen_f_stat,
-        "p_value": chosen_p_value,
-        "used_combination": chosen_combo,
-        "rna_drop_cov": chosen_drop_cov,
-        "rna_sum_drop_cov": chosen_drop_sum,
-        "debug_info": debug_summary,
-    }
+    return chosen
 
 
 def compute_drops_and_usage(group):
@@ -267,7 +378,6 @@ def compute_drops_and_usage(group):
     ]
     drops.append(0.0)
     sum_drops = sum(drops)
-    # If there is no drop, force monotonicity to 0.
     mono = int(all(d > 0 for d in drops[:-1])) if sum_drops > 0 else 0
 
     rna_usage = [
@@ -281,6 +391,15 @@ def compute_drops_and_usage(group):
     group["rna_usage"] = rna_usage
 
     return group
+
+
+def process_segment(segment_tuple, debug=True, max_pas_count=10):
+    segment_id, group = segment_tuple
+    subsegments = group.to_dict("records")
+    result = evaluate_all_pas_usage_patterns(
+        subsegments, segment_id, debug=debug, max_pas_count=max_pas_count
+    )
+    return segment_id, subsegments, result
 
 
 class CalculateCoverages:
@@ -339,60 +458,127 @@ class CalculateCoverages:
         df = pd.DataFrame(all_rows)
         return df
 
-    def evaluate_pas_usage_models(self, raw_cov_df, output_tsv_debug=None):
+    def evaluate_pas_usage_models(
+        self, raw_cov_df, output_tsv_debug=None, n_procs=8, max_pas_count=10
+    ):
         usage_rows = []
         debug_rows = []
-        grouped = raw_cov_df.groupby("segment_id", sort=False)
-        for segment_id, group in grouped:
-            logging.info(f"DEBUG: Evaluating segment {segment_id}")
-            subsegments = group.to_dict("records")
-            result = evaluate_all_pas_usage_patterns(
-                subsegments, segment_id, debug=True
-            )
-            if result is None:
-                continue
-            unique_pas_ids = []
-            for sub in subsegments:
-                pid = str(sub["pas_id"])
-                if pid != "." and pid not in unique_pas_ids:
-                    unique_pas_ids.append(pid)
-            for pid in unique_pas_ids:
-                usage_val = result["pas_usage"].get(pid, 0.0)
+        grouped = list(raw_cov_df.groupby("segment_id", sort=False))
+        if n_procs > 1:
+            with concurrent.futures.ProcessPoolExecutor(
+                max_workers=n_procs
+            ) as executor:
+                results = executor.map(
+                    lambda tup: process_segment(
+                        tup, debug=True, max_pas_count=max_pas_count
+                    ),
+                    grouped,
+                )
+                for segment_id, subsegments, result in results:
+                    if result is None:
+                        continue
+                    unique_pas_ids = []
+                    for sub in subsegments:
+                        pid = str(sub["pas_id"])
+                        if pid != "." and pid not in unique_pas_ids:
+                            unique_pas_ids.append(pid)
+                    for pid in unique_pas_ids:
+                        usage_val = result["pas_usage"].get(pid, 0.0)
+                        for sub in subsegments:
+                            if str(sub["pas_id"]) == pid:
+                                usage_rows.append(
+                                    {
+                                        "gene_id": sub["gene_id"],
+                                        "segment_id": sub["segment_id"],
+                                        "subsegment_id": sub["subsegment_id"],
+                                        "pas_id": pid,
+                                        "mean_cov": sub["mean_cov"],
+                                        "sum_squared_values": sub[
+                                            "sum_squared_values"
+                                        ],
+                                        "rna_drop_cov": (
+                                            result["rna_drop_cov"][
+                                                unique_pas_ids.index(pid)
+                                            ]
+                                            if unique_pas_ids.index(pid)
+                                            < len(result["rna_drop_cov"])
+                                            else 0.0
+                                        ),
+                                        "rna_sum_drop_cov": result[
+                                            "rna_sum_drop_cov"
+                                        ],
+                                        "rna_monotone": result["rna_monotone"],
+                                        "rna_usage": usage_val,
+                                        "f_stat": result["f_stat"],
+                                        "p_value": result["p_value"],
+                                    }
+                                )
+                                break
+                    debug_rows.append(
+                        {
+                            "segment_id": segment_id,
+                            "used_combination": result.get(
+                                "used_combination", []
+                            ),
+                            "debug_info": result.get("debug_info", {}),
+                        }
+                    )
+        else:
+            for segment_id, group in grouped:
+                logging.info(f"DEBUG: Evaluating segment {segment_id}")
+                subsegments = group.to_dict("records")
+                result = evaluate_all_pas_usage_patterns(
+                    subsegments,
+                    segment_id,
+                    debug=True,
+                    max_pas_count=max_pas_count,
+                )
+                if result is None:
+                    continue
+                unique_pas_ids = []
                 for sub in subsegments:
-                    if str(sub["pas_id"]) == pid:
-                        usage_rows.append(
-                            {
-                                "gene_id": sub["gene_id"],
-                                "segment_id": sub["segment_id"],
-                                "subsegment_id": sub["subsegment_id"],
-                                "pas_id": pid,
-                                "mean_cov": sub["mean_cov"],
-                                "sum_squared_values": sub[
-                                    "sum_squared_values"
-                                ],
-                                "rna_drop_cov": (
-                                    result["rna_drop_cov"][
-                                        unique_pas_ids.index(pid)
-                                    ]
-                                    if unique_pas_ids.index(pid)
-                                    < len(result["rna_drop_cov"])
-                                    else 0.0
-                                ),
-                                "rna_sum_drop_cov": result["rna_sum_drop_cov"],
-                                "rna_monotone": result["rna_monotone"],
-                                "rna_usage": usage_val,
-                                "f_stat": result["f_stat"],
-                                "p_value": result["p_value"],
-                            }
-                        )
-                        break
-            debug_rows.append(
-                {
-                    "segment_id": segment_id,
-                    "used_combination": result.get("used_combination", []),
-                    "debug_info": result.get("debug_info", {}),
-                }
-            )
+                    pid = str(sub["pas_id"])
+                    if pid != "." and pid not in unique_pas_ids:
+                        unique_pas_ids.append(pid)
+                for pid in unique_pas_ids:
+                    usage_val = result["pas_usage"].get(pid, 0.0)
+                    for sub in subsegments:
+                        if str(sub["pas_id"]) == pid:
+                            usage_rows.append(
+                                {
+                                    "gene_id": sub["gene_id"],
+                                    "segment_id": sub["segment_id"],
+                                    "subsegment_id": sub["subsegment_id"],
+                                    "pas_id": pid,
+                                    "mean_cov": sub["mean_cov"],
+                                    "sum_squared_values": sub[
+                                        "sum_squared_values"
+                                    ],
+                                    "rna_drop_cov": (
+                                        result["rna_drop_cov"][
+                                            unique_pas_ids.index(pid)
+                                        ]
+                                        if unique_pas_ids.index(pid)
+                                        < len(result["rna_drop_cov"])
+                                        else 0.0
+                                    ),
+                                    "rna_sum_drop_cov": result[
+                                        "rna_sum_drop_cov"
+                                    ],
+                                    "rna_monotone": result["rna_monotone"],
+                                    "rna_usage": usage_val,
+                                    "f_stat": result["f_stat"],
+                                    "p_value": result["p_value"],
+                                }
+                            )
+                            break
+                debug_rows.append(
+                    {
+                        "segment_id": segment_id,
+                        "used_combination": result.get("used_combination", []),
+                        "debug_info": result.get("debug_info", {}),
+                    }
+                )
         if output_tsv_debug:
             with open(output_tsv_debug, "w") as f:
                 json.dump(debug_rows, f, indent=4, default=json_serial)
@@ -427,7 +613,10 @@ class CalculateCoverages:
         output_raw_tsv,
         output_final_tsv,
         output_debug_json=None,
+        n_procs=8,
+        max_pas_count=10,
     ):
+        start_time = time.time()
         log_message("Step 1: Calculating initial coverage metrics...")
         raw_cov_df = self.calculate_coverage_metrics(subsegments_df)
         # For _coverage.tsv output, compute extra columns using compute_drops_and_usage.
@@ -438,8 +627,13 @@ class CalculateCoverages:
 
         log_message("Step 2: Evaluating PAS usage models via F-statistics...")
         refined_usage_df = self.evaluate_pas_usage_models(
-            raw_cov_df, output_debug_json
+            raw_cov_df,
+            output_debug_json,
+            n_procs=n_procs,
+            max_pas_count=max_pas_count,
         )
         self.write_coverage_results(refined_usage_df, output_final_tsv)
 
+        end_time = time.time()
         log_message("PAS usage evaluation complete.")
+        log_message(f"Total runtime: {end_time - start_time:.2f} seconds")
