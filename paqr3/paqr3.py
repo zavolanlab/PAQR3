@@ -1,6 +1,6 @@
 import logging
 import os
-from paqr3.construct_segments import ConstructSegments
+from paqr3.construct_segments import ConstructSegments, log_message
 from paqr3.calculate_cov_metrics import CalculateCoverages
 
 logging.basicConfig(
@@ -20,10 +20,6 @@ logging.getLogger().addHandler(handler)
 logging.getLogger().setLevel(logging.INFO)
 
 
-def log_message(message):
-    logging.info(message)
-
-
 class PAQR3:
     def __init__(
         self,
@@ -34,6 +30,7 @@ class PAQR3:
         output_dir,
         downstream_exon_extension,
         merge_distance,
+        max_pas_count,  # New parameter
     ):
         self.annotation_file = annotation_file
         self.pas_atlas_file = pas_atlas_file
@@ -42,6 +39,7 @@ class PAQR3:
         self.output_dir = output_dir
         self.downstream_exon_extension = downstream_exon_extension
         self.merge_distance = merge_distance
+        self.max_pas_count = max_pas_count
 
     def run(self):
         sample_name_pos = os.path.basename(self.coverage_bw_pos).split(".")[0]
@@ -96,6 +94,7 @@ class PAQR3:
             output_raw_tsv=output_coverage_tsv,
             output_final_tsv=output_usage_tsv,
             output_debug_json=output_debug_json,
+            max_pas_count=self.max_pas_count,  # Pass new parameter
         )
 
         log_message("PAQR3 pipeline completed.")

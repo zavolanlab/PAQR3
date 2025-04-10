@@ -44,7 +44,7 @@ def main():
         nargs=2,
         help=(
             "Paths to the positive and negative strand coverage bigWig files"
-            "(e.g., pos.bw neg.bw)."
+            " (e.g., pos.bw neg.bw)."
         ),
     )
     parser.add_argument(
@@ -53,6 +53,13 @@ def main():
         type=str,
         required=True,
         help="Path to the output directory.",
+    )
+    parser.add_argument(
+        "--max_pas_count",
+        "-mpc",
+        type=int,
+        default=10,
+        help="Only evaluate segments with this number or fewer PAS.",
     )
     parser.add_argument(
         "--version",
@@ -77,6 +84,7 @@ def main():
         args.output_dir,
         args.downstream_exon_extension,
         args.merge_distance,
+        args.max_pas_count,  # New parameter
     )
     paqr3_instance.run()
 
