@@ -551,10 +551,8 @@ class ConstructSegments:
                 pas_chrom == current_chrom
                 and pas_strand == current_strand
                 and pas_start - current_end <= merge_distance
-            ):  # ✅ Merge PAS if within `merge_distance` bp
-                current_end = max(
-                    current_end, pas_end
-                )  # Extend end if overlapping
+            ):
+                current_end = max(current_end, pas_end)
             else:
                 merged_pas_sites.append(
                     (current_chrom, current_start, current_end, current_fields)
@@ -573,24 +571,22 @@ class ConstructSegments:
 
         # Assign PAS IDs and build interval tree
         for chrom, start, end, pas_fields in merged_pas_sites:
-            pas_id = f"{chrom}:{start}:{end}:{pas_fields[5]}"
-            self.pas_mapping[pas_id] = unique_pas_id_counter
+            strand = pas_fields[5]
+            pas_id_str = pas_fields[3]  # the PAS name from the original file
+
+            unique_pas_id = unique_pas_id_counter
             self.pas_data.append(
-                [
-                    unique_pas_id_counter,
-                    chrom,
-                    start,
-                    end,
-                    pas_fields[5],
-                    pas_fields[3],
-                ]
+                [unique_pas_id, chrom, start, end, strand, pas_id_str]
             )
+            self.pas_mapping[f"{chrom}:{start}:{end}:{strand}"] = unique_pas_id
             unique_pas_id_counter += 1
 
-            if (chrom, pas_fields[5]) not in pas_trees:
-                pas_trees[(chrom, pas_fields[5])] = IntervalTree()
-            pas_trees[(chrom, pas_fields[5])].add(
-                Interval(start, end, pas_fields)
+            if (chrom, strand) not in pas_trees:
+                pas_trees[(chrom, strand)] = IntervalTree()
+
+            # Store the PAS ID directly in the Interval
+            pas_trees[(chrom, strand)].add(
+                Interval(start, end, data=unique_pas_id)
             )
 
         return pas_trees
@@ -598,6 +594,8 @@ class ConstructSegments:
     def identify_pas_in_segments(self, pas_trees):
         """
         Identifies PAS sites overlapping with segments and constructs subsegments.
+        Each subsegment is assigned the PAS it follows (strand-aware).
+        Only include PAS that fully overlap the segment.
         """
         log_message(
             "Identifying PAS overlaps with segments and constructing subsegments..."
@@ -614,24 +612,28 @@ class ConstructSegments:
                 subsegments = []
 
                 if (chrom, strand) in pas_trees:
+                    # Get all intervals that overlap the segment
                     overlapping_intervals = pas_trees[(chrom, strand)][
                         segment_start:segment_end
                     ]
+                    # Filter to include only PAS that are fully contained within the segment boundaries
                     sorted_intervals = sorted(
-                        overlapping_intervals, key=lambda x: x.begin
+                        [
+                            interval
+                            for interval in overlapping_intervals
+                            if interval.begin >= segment_start
+                            and interval.end <= segment_end
+                        ],
+                        key=lambda x: x.begin,
                     )
 
                     current_subsegment_start = segment_start
 
                     if sorted_intervals:
                         for interval in sorted_intervals:
-                            pas_start, pas_end, pas_fields = (
-                                interval.begin,
-                                interval.end,
-                                interval.data,
-                            )
-                            pas_id = f"{pas_fields[0]}:{pas_fields[1]}:{pas_fields[2]}:{pas_fields[5]}"
-                            unique_pas_id = self.pas_mapping.get(pas_id)
+                            pas_start = interval.begin
+                            pas_end = interval.end
+                            unique_pas_id = interval.data
 
                             if pas_start > current_subsegment_start:
                                 subsegments.append(
@@ -647,11 +649,12 @@ class ConstructSegments:
                                                 "segment_number"
                                             ],
                                             "strand": strand,
+                                            "pas_id": None,  # Placeholder for now
                                         },
                                     )
                                 )
 
-                            current_subsegment_start = pas_end  # No +1!
+                            current_subsegment_start = pas_end
                             overlapping_pas.append(unique_pas_id)
 
                         if current_subsegment_start <= segment_end:
@@ -668,6 +671,7 @@ class ConstructSegments:
                                             "segment_number"
                                         ],
                                         "strand": strand,
+                                        "pas_id": None,  # Placeholder for now
                                     },
                                 )
                             )
@@ -677,6 +681,16 @@ class ConstructSegments:
 
                 for i, subsegment in enumerate(subsegments):
                     subsegment.attributes["subsegment_number"] = i + 1
+                    # Assign PAS ID based on strand and position
+                    pas_index = (
+                        i if strand == "+" else len(overlapping_pas) - i - 1
+                    )
+                    if 0 <= pas_index < len(overlapping_pas):
+                        subsegment.attributes["pas_id"] = overlapping_pas[
+                            pas_index
+                        ]
+                    else:
+                        subsegment.attributes["pas_id"] = "."
 
                 segment.attributes["overlapping_pas"] = overlapping_pas
                 segment.subsegments = subsegments
@@ -836,7 +850,6 @@ class ConstructSegments:
             for segment in gene.segments:
                 if hasattr(segment, "subsegments"):
                     for subsegment in segment.subsegments:
-                        # Filter out subsegments that overlap PAS sites
                         if subsegment.end - subsegment.start > 0:
                             subsegments_data.append(
                                 [
@@ -847,6 +860,7 @@ class ConstructSegments:
                                     subsegment.start,
                                     subsegment.end,
                                     subsegment.strand,
+                                    subsegment.attributes.get("pas_id", "."),
                                 ]
                             )
         return pd.DataFrame(
@@ -859,6 +873,7 @@ class ConstructSegments:
                 "start",
                 "end",
                 "strand",
+                "pas_id",
             ],
         )
 
