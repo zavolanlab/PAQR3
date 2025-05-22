@@ -26,38 +26,46 @@ def json_serial(obj):
 
 
 def evaluate_all_pas_usage_patterns(
-    subsegments, segment_id, debug=True, max_pas_count=10
+    subsegments,
+    segment_id,
+    debug=True,
+    max_pas_count=10,
+    f_stat_threshold=100,
 ):
+    """
+    Select all monotonic PAS combinations with F-stat >= threshold,
+    then build a single 'union' pattern of all PAS used in any of them,
+    and compute drops, usage, and monotonicity from that union pattern.
+    """
     log = logging.info
 
-    # Retrieve the raw coverage arrays and PAS IDs.
     coverage_arrays = [s["coverage"] for s in subsegments]
     pas_ids = [str(s["pas_id"]) for s in subsegments]
     computed_means = [
         np.mean(cov) if len(cov) > 0 else 0.0 for cov in coverage_arrays
     ]
+    unique_pas_ids = [pid for pid in pas_ids if pid != "."]
 
-    # Early exit if all coverage arrays are zero.
+    # 1) Early exit if all coverage zero
     if all(mu == 0 for mu in computed_means):
         msg = f"[{segment_id}] All subsegment coverages are 0 → Assign usage = 0 to all PAS"
         log(msg)
         if debug:
             logging.info("DEBUG: " + msg)
-        unique_pas_ids = [pid for pid in pas_ids if pid != "."]
+        zero_drops = [0.0] * len(unique_pas_ids)
         return {
             "pas_usage": {pid: 0.0 for pid in unique_pas_ids},
-            "rna_monotone": 0,
-            "f_stat": 0.0,
+            "f_stat": None,
             "p_value": None,
-            "used_combination": "none",
-            "rna_drop_cov": [0.0] * len(subsegments),
+            "rna_drop_cov": zero_drops,
             "rna_sum_drop_cov": 0.0,
+            "rna_monotone": 0,
+            "used_combos": [],
             "debug_info": "All coverages zero, no PAS used.",
+            "unique_pas_ids": unique_pas_ids,
         }
 
-    unique_pas_ids = [pid for pid in pas_ids if pid != "."]
-
-    # New check: only evaluate segments with max_pas_count or fewer PAS
+    # 2) Too many PAS? skip
     if len(unique_pas_ids) > max_pas_count:
         msg = (
             f"[{segment_id}] Too many PAS ({len(unique_pas_ids)}) in this segment; "
@@ -68,10 +76,7 @@ def evaluate_all_pas_usage_patterns(
             logging.info("DEBUG: " + msg)
         return None
 
-    if debug:
-        logging.info(
-            f"DEBUG: Processing segment {segment_id} with PAS: {unique_pas_ids}"
-        )
+    # 3) No PAS at all? skip
     if not unique_pas_ids:
         msg = f"[{segment_id}] No PAS found in this segment, skipping."
         log(msg)
@@ -79,158 +84,194 @@ def evaluate_all_pas_usage_patterns(
             logging.info("DEBUG: " + msg)
         return None
 
-    best_mono = None  # best monotonic candidate info
-    best_mono_f_stat = -np.inf
-
+    # 4) Evaluate every monotonic combo, collect those above threshold
+    combos_info = []  # will store tuples (pattern, f_stat, p_value)
     m = len(unique_pas_ids)
-    # Phase 1: Evaluate only monotonic combinations
-    for binary_pattern in itertools.product([0, 1], repeat=m):
-        if sum(binary_pattern) == 0:
+    for pattern in itertools.product([0, 1], repeat=m):
+        if sum(pattern) == 0:
             continue
 
-        used_pas = [
-            pid
-            for pid, flag in zip(unique_pas_ids, binary_pattern)
-            if flag == 1
-        ]
-
-        # Create groups: when an active PAS is encountered, include the current subsegment then split.
-        groups = []
-        current_group = []
-        current_pas_idx = 0
-        for i, pid in enumerate(pas_ids):
+        # Build groups for this pattern
+        groups, current, idx = [], [], 0
+        for cov_idx, pid in enumerate(pas_ids):
             if pid == ".":
-                current_group.append(i)
+                current.append(cov_idx)
             else:
-                if unique_pas_ids[current_pas_idx] in used_pas:
-                    current_group.append(i)
-                    groups.append(current_group)
-                    current_group = []
+                if pattern[idx] == 1:
+                    current.append(cov_idx)
+                    groups.append(current)
+                    current = []
                 else:
-                    current_group.append(i)
-                current_pas_idx += 1
-        if current_group:
-            groups.append(current_group)
+                    current.append(cov_idx)
+                idx += 1
+        if current:
+            groups.append(current)
 
-        # Recalculate group means from the raw coverage values.
+        # Compute group means
         group_means = [
             (
-                np.mean(np.concatenate([coverage_arrays[i] for i in group]))
-                if group
+                np.mean(np.concatenate([coverage_arrays[i] for i in g]))
+                if g
                 else 0.0
             )
-            for group in groups
+            for g in groups
         ]
-        # Compute drop_list and drop_sum
+
+        # Compute drops and check monotonicity
         if len(group_means) >= 2:
-            drop_list = [
+            drops = [
                 group_means[i] - group_means[i + 1]
                 for i in range(len(group_means) - 1)
             ]
         else:
-            drop_list = [group_means[0]]
-        drop_list.append(0.0)
-        drop_sum = sum(drop_list)
-        # Check monotonicity (if drop_sum > 0, then check if non-increasing)
-        is_monotonic = False
-        if drop_sum > 0:
-            is_monotonic = all(
+            drops = [group_means[0]]
+        drops.append(0.0)
+        total_drops = sum(drops)
+        if not (
+            total_drops > 0
+            and all(
                 group_means[i] >= group_means[i + 1]
                 for i in range(len(group_means) - 1)
             )
-        if not is_monotonic:
-            continue  # Skip combinations that are not monotonic
+        ):
+            continue
 
-        # For monotonic combinations, compute F-statistics
+        # Compute F-statistic
         all_covs = np.concatenate(
-            [
-                np.concatenate([coverage_arrays[i] for i in group])
-                for group in groups
-            ]
+            [np.concatenate([coverage_arrays[i] for i in g]) for g in groups]
         )
         overall_mean = np.mean(all_covs)
         ss_between = sum(
-            len(np.concatenate([coverage_arrays[i] for i in group]))
+            len(np.concatenate([coverage_arrays[i] for i in g]))
             * (gm - overall_mean) ** 2
-            for group, gm in zip(groups, group_means)
+            for g, gm in zip(groups, group_means)
         )
         ss_within = sum(
-            np.sum(
-                (np.concatenate([coverage_arrays[i] for i in group]) - gm) ** 2
-            )
-            for group, gm in zip(groups, group_means)
+            np.sum((np.concatenate([coverage_arrays[i] for i in g]) - gm) ** 2)
+            for g, gm in zip(groups, group_means)
         )
-        df_between = len(groups) - 1
-        df_within = len(all_covs) - len(groups)
-        if df_within == 0 or ss_within == 0:
-            f_stat = 0.0
-            p_value = None
+        df_b, df_w = len(groups) - 1, len(all_covs) - len(groups)
+        if df_w == 0 or ss_within == 0:
+            f_stat, p_val = 0.0, None
         else:
-            f_stat = (ss_between / df_between) / (ss_within / df_within)
-            p_value = 1 - f.cdf(f_stat, df_between, df_within)
-
-        usage_values = []
-        drop_idx = 0
-        for flag in binary_pattern:
-            if flag == 1:
-                usage_values.append(
-                    (drop_list[drop_idx] / drop_sum) if drop_sum > 0 else 0.0
-                )
-                drop_idx += 1
-            else:
-                usage_values.append(0.0)
-        usage_dict = {
-            pid: u
-            for pid, u, flag in zip(
-                unique_pas_ids, usage_values, binary_pattern
-            )
-            if flag == 1
-        }
-
-        debug_info = {
-            "combo": binary_pattern,
-            "f_stat": f_stat,
-            "p_value": p_value,
-            "group_means": group_means,
-            "monotonic": True,
-            "groups": groups,
-            "usage": usage_dict,
-            "drop_list": drop_list,
-            "drop_sum": drop_sum,
-        }
+            f_stat = (ss_between / df_b) / (ss_within / df_w)
+            p_val = 1 - f.cdf(f_stat, df_b, df_w)
 
         if debug:
             logging.info(
-                f"DEBUG: Segment {segment_id} monotonic combo {binary_pattern}: f_stat={f_stat}, p_value={p_value}, "
-                f"group_means={group_means}, drop_list={drop_list}, usage={usage_dict}"
+                f"DEBUG: Segment {segment_id} pattern {pattern}: f_stat={f_stat:.3f}"
             )
 
-        if f_stat > best_mono_f_stat:
-            best_mono_f_stat = f_stat
-            best_mono = {
-                "pas_usage": usage_dict,
-                "f_stat": f_stat,
-                "p_value": p_value,
-                "used_combination": binary_pattern,
-                "rna_drop_cov": drop_list,
-                "rna_sum_drop_cov": drop_sum,
-                "debug_info": debug_info,
-                "rna_monotone": 1,
-            }
+        if f_stat >= f_stat_threshold:
+            combos_info.append((pattern, f_stat, p_val))
 
-    # If no monotonic combination was found, skip this segment.
-    if best_mono is None:
-        msg = f"[{segment_id}] No monotonic PAS combinations found; skipping segment."
+    # 5) If none passed, skip
+    if not combos_info:
+        msg = f"[{segment_id}] No PAS combinations met the F-stat threshold; skipping segment."
         log(msg)
         if debug:
             logging.info("DEBUG: " + msg)
         return None
 
-    return best_mono
+    # 6) Build the union pattern of all PAS used in any kept combo
+    union_pattern = [
+        int(any(pat[i] for pat, *_ in combos_info)) for i in range(m)
+    ]
+    if sum(union_pattern) == 0:
+        return None
+
+    # Recompute drops & usage for the union pattern
+    groups, current, idx = [], [], 0
+    for cov_idx, pid in enumerate(pas_ids):
+        if pid == ".":
+            current.append(cov_idx)
+        else:
+            if union_pattern[idx] == 1:
+                current.append(cov_idx)
+                groups.append(current)
+                current = []
+            else:
+                current.append(cov_idx)
+            idx += 1
+    if current:
+        groups.append(current)
+
+    # Compute union group means
+    group_means = [
+        np.mean(np.concatenate([coverage_arrays[i] for i in g])) if g else 0.0
+        for g in groups
+    ]
+    if debug:
+        logging.info(
+            f"DEBUG: Segment {segment_id} union group means: {group_means}"
+        )
+
+    # Compute union drops
+    if len(group_means) >= 2:
+        union_drops = [
+            group_means[i] - group_means[i + 1]
+            for i in range(len(group_means) - 1)
+        ]
+    else:
+        union_drops = [group_means[0]]
+    union_drops.append(0.0)
+    sum_union_drops = sum(union_drops)
+
+    # Correct monotonicity = all drops ≥ 0
+    union_mono = int(
+        sum_union_drops > 0 and all(d >= 0 for d in union_drops[:-1])
+    )
+
+    # Map drops back to each PAS
+    drop_per_pas, drop_idx = [], 0
+    for flag in union_pattern:
+        if flag:
+            drop_per_pas.append(union_drops[drop_idx])
+            drop_idx += 1
+        else:
+            drop_per_pas.append(0.0)
+
+    # Compute usage proportions
+    usage_per_pas = [
+        (d / sum_union_drops if sum_union_drops > 0 else 0.0)
+        for d in drop_per_pas
+    ]
+
+    # Pick best F-statistic among original combos for reporting
+    best_pattern, best_f, best_p = max(combos_info, key=lambda x: x[1])
+
+    if debug:
+        logging.info(
+            f"DEBUG: Segment {segment_id} union_pattern: {union_pattern}"
+        )
+        logging.info(f"DEBUG: Segment {segment_id} union_drops: {union_drops}")
+        logging.info(
+            f"DEBUG: Segment {segment_id} union_monotonic: {union_mono}"
+        )
+        logging.info(
+            f"DEBUG: Segment {segment_id} usage_per_pas: {usage_per_pas}"
+        )
+
+    return {
+        "pas_usage": {
+            pid: usage for pid, usage in zip(unique_pas_ids, usage_per_pas)
+        },
+        "f_stat": best_f,
+        "p_value": best_p,
+        "rna_drop_cov": drop_per_pas,
+        "rna_sum_drop_cov": sum_union_drops,
+        "rna_monotone": union_mono,
+        "used_combos": [pat for pat, *_ in combos_info],
+        "debug_info": {
+            "threshold": f_stat_threshold,
+            "num_kept_combos": len(combos_info),
+        },
+        "unique_pas_ids": unique_pas_ids,
+    }
 
 
 def compute_drops_and_usage(group):
-    """Compute rna_drop_cov, rna_sum_drop_cov, rna_monotone, and rna_usage based on precomputed mean_cov values."""
+    """Compute rna_drop_cov, rna_sum_drop_cov, rna_monotone, and rna_usage."""
     group = group.sort_values("subsegment_id")
     mean_covs = group["mean_cov"].values
     pas_ids = group["pas_id"].astype(str).values
@@ -255,11 +296,20 @@ def compute_drops_and_usage(group):
     return group
 
 
-def process_segment(segment_tuple, debug=True, max_pas_count=10):
+def process_segment(
+    segment_tuple,
+    debug=True,
+    max_pas_count=10,
+    f_stat_threshold=100,
+):
     segment_id, group = segment_tuple
     subsegments = group.to_dict("records")
     result = evaluate_all_pas_usage_patterns(
-        subsegments, segment_id, debug=debug, max_pas_count=max_pas_count
+        subsegments,
+        segment_id,
+        debug=debug,
+        max_pas_count=max_pas_count,
+        f_stat_threshold=f_stat_threshold,
     )
     return segment_id, subsegments, result
 
@@ -310,65 +360,64 @@ class CalculateCoverages:
                     "pas_id": pas_id,
                     "mean_cov": mean_cov,
                     "sum_squared_values": sum_squared,
-                    "coverage": coverage,  # Keep raw coverage for downstream calculations.
+                    "coverage": coverage,
                 }
             )
 
         bw_pos.close()
         bw_neg.close()
-
-        df = pd.DataFrame(all_rows)
-        return df
+        return pd.DataFrame(all_rows)
 
     def evaluate_pas_usage_models(
-        self, raw_cov_df, output_tsv_debug=None, n_procs=8, max_pas_count=10
+        self,
+        raw_cov_df,
+        output_tsv_debug=None,
+        n_procs=8,
+        max_pas_count=10,
+        f_stat_threshold=100,
     ):
         usage_rows = []
         debug_rows = []
         grouped = list(raw_cov_df.groupby("segment_id", sort=False))
+
         if n_procs > 1:
             with concurrent.futures.ProcessPoolExecutor(
                 max_workers=n_procs
             ) as executor:
-                process_func = partial(
-                    process_segment, debug=True, max_pas_count=max_pas_count
+                func = partial(
+                    process_segment,
+                    debug=True,
+                    max_pas_count=max_pas_count,
+                    f_stat_threshold=f_stat_threshold,
                 )
-                results = executor.map(process_func, grouped)
-                for segment_id, subsegments, result in results:
-                    if result is None:
+                for segment_id, subsegments, result in executor.map(
+                    func, grouped
+                ):
+                    if not result:
                         continue
-                    unique_pas_ids = []
-                    for sub in subsegments:
-                        pid = str(sub["pas_id"])
-                        if pid != "." and pid not in unique_pas_ids:
-                            unique_pas_ids.append(pid)
-                    for pid in unique_pas_ids:
-                        usage_val = result["pas_usage"].get(pid, 0.0)
-                        for sub in subsegments:
-                            if str(sub["pas_id"]) == pid:
+                    uids = result["unique_pas_ids"]
+                    for pid, usage in result["pas_usage"].items():
+                        drop_idx = uids.index(pid)
+                        for s in subsegments:
+                            if str(s["pas_id"]) == pid:
                                 usage_rows.append(
                                     {
-                                        "gene_id": sub["gene_id"],
-                                        "segment_id": sub["segment_id"],
-                                        "subsegment_id": sub["subsegment_id"],
+                                        "gene_id": s["gene_id"],
+                                        "segment_id": s["segment_id"],
+                                        "subsegment_id": s["subsegment_id"],
                                         "pas_id": pid,
-                                        "mean_cov": sub["mean_cov"],
-                                        "sum_squared_values": sub[
+                                        "mean_cov": s["mean_cov"],
+                                        "sum_squared_values": s[
                                             "sum_squared_values"
                                         ],
-                                        "rna_drop_cov": (
-                                            result["rna_drop_cov"][
-                                                unique_pas_ids.index(pid)
-                                            ]
-                                            if unique_pas_ids.index(pid)
-                                            < len(result["rna_drop_cov"])
-                                            else 0.0
-                                        ),
+                                        "rna_drop_cov": result["rna_drop_cov"][
+                                            drop_idx
+                                        ],
                                         "rna_sum_drop_cov": result[
                                             "rna_sum_drop_cov"
                                         ],
                                         "rna_monotone": result["rna_monotone"],
-                                        "rna_usage": usage_val,
+                                        "rna_usage": usage,
                                         "f_stat": result["f_stat"],
                                         "p_value": result["p_value"],
                                     }
@@ -377,10 +426,8 @@ class CalculateCoverages:
                     debug_rows.append(
                         {
                             "segment_id": segment_id,
-                            "used_combination": result.get(
-                                "used_combination", []
-                            ),
-                            "debug_info": result.get("debug_info", {}),
+                            "used_combos": result["used_combos"],
+                            "debug_info": result["debug_info"],
                         }
                     )
         else:
@@ -392,41 +439,33 @@ class CalculateCoverages:
                     segment_id,
                     debug=True,
                     max_pas_count=max_pas_count,
+                    f_stat_threshold=f_stat_threshold,
                 )
-                if result is None:
+                if not result:
                     continue
-                unique_pas_ids = []
-                for sub in subsegments:
-                    pid = str(sub["pas_id"])
-                    if pid != "." and pid not in unique_pas_ids:
-                        unique_pas_ids.append(pid)
-                for pid in unique_pas_ids:
-                    usage_val = result["pas_usage"].get(pid, 0.0)
-                    for sub in subsegments:
-                        if str(sub["pas_id"]) == pid:
+                uids = result["unique_pas_ids"]
+                for pid, usage in result["pas_usage"].items():
+                    drop_idx = uids.index(pid)
+                    for s in subsegments:
+                        if str(s["pas_id"]) == pid:
                             usage_rows.append(
                                 {
-                                    "gene_id": sub["gene_id"],
-                                    "segment_id": sub["segment_id"],
-                                    "subsegment_id": sub["subsegment_id"],
+                                    "gene_id": s["gene_id"],
+                                    "segment_id": s["segment_id"],
+                                    "subsegment_id": s["subsegment_id"],
                                     "pas_id": pid,
-                                    "mean_cov": sub["mean_cov"],
-                                    "sum_squared_values": sub[
+                                    "mean_cov": s["mean_cov"],
+                                    "sum_squared_values": s[
                                         "sum_squared_values"
                                     ],
-                                    "rna_drop_cov": (
-                                        result["rna_drop_cov"][
-                                            unique_pas_ids.index(pid)
-                                        ]
-                                        if unique_pas_ids.index(pid)
-                                        < len(result["rna_drop_cov"])
-                                        else 0.0
-                                    ),
+                                    "rna_drop_cov": result["rna_drop_cov"][
+                                        drop_idx
+                                    ],
                                     "rna_sum_drop_cov": result[
                                         "rna_sum_drop_cov"
                                     ],
                                     "rna_monotone": result["rna_monotone"],
-                                    "rna_usage": usage_val,
+                                    "rna_usage": usage,
                                     "f_stat": result["f_stat"],
                                     "p_value": result["p_value"],
                                 }
@@ -435,15 +474,17 @@ class CalculateCoverages:
                 debug_rows.append(
                     {
                         "segment_id": segment_id,
-                        "used_combination": result.get("used_combination", []),
-                        "debug_info": result.get("debug_info", {}),
+                        "used_combos": result["used_combos"],
+                        "debug_info": result["debug_info"],
                     }
                 )
+
         if output_tsv_debug:
             with open(output_tsv_debug, "w") as f:
                 json.dump(debug_rows, f, indent=4, default=json_serial)
+
         usage_df = pd.DataFrame(usage_rows)
-        ordered_columns = [
+        cols = [
             "gene_id",
             "segment_id",
             "subsegment_id",
@@ -457,11 +498,9 @@ class CalculateCoverages:
             "f_stat",
             "p_value",
         ]
-        usage_df = usage_df[ordered_columns]
-        return usage_df
+        return usage_df[cols]
 
     def write_coverage_results(self, results_df, output_tsv):
-        # Drop "coverage" column before writing output.
         if "coverage" in results_df.columns:
             results_df = results_df.drop(columns=["coverage"])
         results_df.to_csv(output_tsv, sep="\t", index=False)
@@ -475,11 +514,11 @@ class CalculateCoverages:
         output_debug_json=None,
         n_procs=8,
         max_pas_count=10,
+        f_stat_threshold=100,
     ):
         start_time = time.time()
         log_message("Step 1: Calculating initial coverage metrics...")
         raw_cov_df = self.calculate_coverage_metrics(subsegments_df)
-        # For _coverage.tsv output, compute extra columns using compute_drops_and_usage.
         cov_df = raw_cov_df.groupby(
             ["gene_id", "segment_id"], group_keys=False
         ).apply(compute_drops_and_usage)
@@ -491,6 +530,7 @@ class CalculateCoverages:
             output_debug_json,
             n_procs=n_procs,
             max_pas_count=max_pas_count,
+            f_stat_threshold=f_stat_threshold,
         )
         self.write_coverage_results(refined_usage_df, output_final_tsv)
 
