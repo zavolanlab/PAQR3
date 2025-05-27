@@ -4,10 +4,12 @@ import pyBigWig  # type: ignore
 import numpy as np
 import itertools
 import json
-from scipy.stats import f  # type: ignore
 import time
 import concurrent.futures
+import pysam  # type: ignore
 from functools import partial
+from scipy.stats import f  # type: ignore
+from pybedtools import BedTool  # type: ignore
 
 
 def log_message(message):
@@ -36,6 +38,7 @@ def evaluate_all_pas_usage_patterns(
     Select all monotonic PAS combinations with F-stat >= threshold,
     then build a single 'union' pattern of all PAS used in any of them,
     and compute drops, usage, and monotonicity from that union pattern.
+    For segments with exactly one PAS, assigns usage=1.0 if coverage>0.
     """
     log = logging.info
 
@@ -65,7 +68,39 @@ def evaluate_all_pas_usage_patterns(
             "unique_pas_ids": unique_pas_ids,
         }
 
-    # 2) Too many PAS? skip
+    # 2) Single‐PAS segment: force usage = 1 if coverage > 0
+    if len(unique_pas_ids) == 1:
+        pid = unique_pas_ids[0]
+        # find first coverage for that PAS
+        idx = next(i for i, x in enumerate(pas_ids) if x == pid)
+        mu = computed_means[idx]
+        if mu > 0:
+            usage = 1.0
+            drop = mu
+            sum_drop = mu
+            mono = 1
+        else:
+            usage = 0.0
+            drop = 0.0
+            sum_drop = 0.0
+            mono = 0
+        if debug:
+            logging.info(
+                f"DEBUG: [{segment_id}] Single PAS '{pid}', mean_cov={mu:.3f} → usage={usage}"
+            )
+        return {
+            "pas_usage": {pid: usage},
+            "f_stat": None,
+            "p_value": None,
+            "rna_drop_cov": [drop],
+            "rna_sum_drop_cov": sum_drop,
+            "rna_monotone": mono,
+            "used_combos": [],
+            "debug_info": "Single-PAS segment; forced usage.",
+            "unique_pas_ids": unique_pas_ids,
+        }
+
+    # 3) Too many PAS? skip
     if len(unique_pas_ids) > max_pas_count:
         msg = (
             f"[{segment_id}] Too many PAS ({len(unique_pas_ids)}) in this segment; "
@@ -76,7 +111,7 @@ def evaluate_all_pas_usage_patterns(
             logging.info("DEBUG: " + msg)
         return None
 
-    # 3) No PAS at all? skip
+    # 4) No PAS at all? skip
     if not unique_pas_ids:
         msg = f"[{segment_id}] No PAS found in this segment, skipping."
         log(msg)
@@ -84,14 +119,13 @@ def evaluate_all_pas_usage_patterns(
             logging.info("DEBUG: " + msg)
         return None
 
-    # 4) Evaluate every monotonic combo, collect those above threshold
-    combos_info = []  # will store tuples (pattern, f_stat, p_value)
+    # 5) Evaluate every monotonic combo, collect those above threshold
+    combos_info = []
     m = len(unique_pas_ids)
     for pattern in itertools.product([0, 1], repeat=m):
         if sum(pattern) == 0:
             continue
 
-        # Build groups for this pattern
         groups, current, idx = [], [], 0
         for cov_idx, pid in enumerate(pas_ids):
             if pid == ".":
@@ -107,7 +141,6 @@ def evaluate_all_pas_usage_patterns(
         if current:
             groups.append(current)
 
-        # Compute group means
         group_means = [
             (
                 np.mean(np.concatenate([coverage_arrays[i] for i in g]))
@@ -117,7 +150,6 @@ def evaluate_all_pas_usage_patterns(
             for g in groups
         ]
 
-        # Compute drops and check monotonicity
         if len(group_means) >= 2:
             drops = [
                 group_means[i] - group_means[i + 1]
@@ -136,7 +168,6 @@ def evaluate_all_pas_usage_patterns(
         ):
             continue
 
-        # Compute F-statistic
         all_covs = np.concatenate(
             [np.concatenate([coverage_arrays[i] for i in g]) for g in groups]
         )
@@ -165,7 +196,7 @@ def evaluate_all_pas_usage_patterns(
         if f_stat >= f_stat_threshold:
             combos_info.append((pattern, f_stat, p_val))
 
-    # 5) If none passed, skip
+    # 6) If none passed, skip
     if not combos_info:
         msg = f"[{segment_id}] No PAS combinations met the F-stat threshold; skipping segment."
         log(msg)
@@ -173,14 +204,10 @@ def evaluate_all_pas_usage_patterns(
             logging.info("DEBUG: " + msg)
         return None
 
-    # 6) Build the union pattern of all PAS used in any kept combo
+    # 7) Build the union pattern and compute final drops & usage
     union_pattern = [
         int(any(pat[i] for pat, *_ in combos_info)) for i in range(m)
     ]
-    if sum(union_pattern) == 0:
-        return None
-
-    # Recompute drops & usage for the union pattern
     groups, current, idx = [], [], 0
     for cov_idx, pid in enumerate(pas_ids):
         if pid == ".":
@@ -196,7 +223,6 @@ def evaluate_all_pas_usage_patterns(
     if current:
         groups.append(current)
 
-    # Compute union group means
     group_means = [
         np.mean(np.concatenate([coverage_arrays[i] for i in g])) if g else 0.0
         for g in groups
@@ -206,7 +232,6 @@ def evaluate_all_pas_usage_patterns(
             f"DEBUG: Segment {segment_id} union group means: {group_means}"
         )
 
-    # Compute union drops
     if len(group_means) >= 2:
         union_drops = [
             group_means[i] - group_means[i + 1]
@@ -217,12 +242,10 @@ def evaluate_all_pas_usage_patterns(
     union_drops.append(0.0)
     sum_union_drops = sum(union_drops)
 
-    # Correct monotonicity = all drops ≥ 0
     union_mono = int(
         sum_union_drops > 0 and all(d >= 0 for d in union_drops[:-1])
     )
 
-    # Map drops back to each PAS
     drop_per_pas, drop_idx = [], 0
     for flag in union_pattern:
         if flag:
@@ -231,13 +254,10 @@ def evaluate_all_pas_usage_patterns(
         else:
             drop_per_pas.append(0.0)
 
-    # Compute usage proportions
     usage_per_pas = [
         (d / sum_union_drops if sum_union_drops > 0 else 0.0)
         for d in drop_per_pas
     ]
-
-    # Pick best F-statistic among original combos for reporting
     best_pattern, best_f, best_p = max(combos_info, key=lambda x: x[1])
 
     if debug:
@@ -271,7 +291,6 @@ def evaluate_all_pas_usage_patterns(
 
 
 def compute_drops_and_usage(group):
-    """Compute rna_drop_cov, rna_sum_drop_cov, rna_monotone, and rna_usage."""
     group = group.sort_values("subsegment_id")
     mean_covs = group["mean_cov"].values
     pas_ids = group["pas_id"].astype(str).values
@@ -315,9 +334,17 @@ def process_segment(
 
 
 class CalculateCoverages:
-    def __init__(self, coverage_bw_pos, coverage_bw_neg):
+    def __init__(
+        self,
+        coverage_bw_pos,
+        coverage_bw_neg,
+        bam_file=None,
+        f_stat_threshold=100,
+    ):
         self.coverage_bw_pos = coverage_bw_pos
         self.coverage_bw_neg = coverage_bw_neg
+        self.bam_file = bam_file
+        self.f_stat_threshold = f_stat_threshold
 
     def calculate_coverage_metrics(self, subsegments_df):
         bw_pos = pyBigWig.open(self.coverage_bw_pos)
@@ -336,12 +363,7 @@ class CalculateCoverages:
             segment_id = f"{gene_id}.{seg_num}"
             subsegment_id = f"{gene_id}.{seg_num}.{subseg_num}"
 
-            if strand == "+":
-                bw = bw_pos
-            elif strand == "-":
-                bw = bw_neg
-            else:
-                raise ValueError(f"Invalid strand: {strand}")
+            bw = bw_pos if strand == "+" else bw_neg
 
             try:
                 coverage = bw.values(chrom, start, end, numpy=True)
@@ -506,6 +528,104 @@ class CalculateCoverages:
         results_df.to_csv(output_tsv, sep="\t", index=False)
         log_message(f"Results written to {output_tsv}")
 
+    def calculate_segment_expression_stats(self, usage_df, subsegments_df):
+        """
+        Calculate per-segment:
+          - rpm = read_count / segment_length
+          - rpm_rank (dense rank, highest=1)
+          - median_cov across the segment (from BigWig)
+          - median_rank (dense rank, highest=1)
+        """
+
+        # 1) Build segment metadata
+        seg_meta = subsegments_df.groupby(
+            ["gene_unique_id", "segment_number"], as_index=False
+        ).agg(
+            chrom=("chrom", "first"),
+            strand=("strand", "first"),
+            start=("start", "min"),
+            end=("end", "max"),
+        )
+        seg_meta["segment_id"] = (
+            seg_meta["gene_unique_id"].astype(str)
+            + "."
+            + seg_meta["segment_number"].astype(str)
+        )
+
+        # 2) Count reads per segment via pysam (streaming, low memory)
+        if not self.bam_file:
+            raise ValueError("BAM file is required to compute RPM.")
+        bam = pysam.AlignmentFile(self.bam_file, "rb")
+        read_counts = []
+        for _, row in seg_meta.iterrows():
+            count = bam.count(
+                contig=row["chrom"],
+                start=int(row["start"]),
+                end=int(row["end"]),
+            )
+            read_counts.append(count)
+        bam.close()
+
+        seg_meta["read_count"] = read_counts
+
+        # 3) Compute rpm and median coverage from BigWig
+        bw_pos = pyBigWig.open(self.coverage_bw_pos)
+        bw_neg = pyBigWig.open(self.coverage_bw_neg)
+
+        def _get_median_cov(r):
+            bw = bw_pos if r["strand"] == "+" else bw_neg
+            vals = bw.values(
+                r["chrom"], int(r["start"]), int(r["end"]), numpy=True
+            )
+            return float(np.nanmedian(np.nan_to_num(vals, nan=0.0)))
+
+        seg_meta["segment_length"] = seg_meta["end"] - seg_meta["start"]
+        seg_meta["rpm"] = seg_meta["read_count"] / seg_meta["segment_length"]
+        seg_meta["median_cov"] = seg_meta.apply(_get_median_cov, axis=1)
+
+        bw_pos.close()
+        bw_neg.close()
+
+        # 4) Dense ranking (highest value → rank 1)
+        seg_meta["rpm_rank"] = (
+            seg_meta["rpm"].rank(method="dense", ascending=False).astype(int)
+        )
+        seg_meta["median_rank"] = (
+            seg_meta["median_cov"]
+            .rank(method="dense", ascending=False)
+            .astype(int)
+        )
+
+        # 5) Merge back onto the PAS‐level usage_df
+        merged = usage_df.merge(
+            seg_meta[
+                ["segment_id", "rpm", "rpm_rank", "median_cov", "median_rank"]
+            ],
+            on="segment_id",
+            how="left",
+        )
+
+        # 6) Enforce column order
+        cols = [
+            "gene_id",
+            "segment_id",
+            "subsegment_id",
+            "pas_id",
+            "mean_cov",
+            "sum_squared_values",
+            "rna_drop_cov",
+            "rna_sum_drop_cov",
+            "rna_monotone",
+            "rna_usage",
+            "f_stat",
+            "p_value",
+            "rpm",
+            "rpm_rank",
+            "median_cov",
+            "median_rank",
+        ]
+        return merged[cols]
+
     def run(
         self,
         subsegments_df,
@@ -514,9 +634,11 @@ class CalculateCoverages:
         output_debug_json=None,
         n_procs=8,
         max_pas_count=10,
-        f_stat_threshold=100,
+        f_stat_threshold=None,
     ):
         start_time = time.time()
+
+        # Step 1: initial coverage metrics
         log_message("Step 1: Calculating initial coverage metrics...")
         raw_cov_df = self.calculate_coverage_metrics(subsegments_df)
         cov_df = raw_cov_df.groupby(
@@ -524,14 +646,35 @@ class CalculateCoverages:
         ).apply(compute_drops_and_usage)
         self.write_coverage_results(cov_df.copy(), output_raw_tsv)
 
+        # Step 2: PAS usage via F-statistics
         log_message("Step 2: Evaluating PAS usage models via F-statistics...")
+        # prefer the passed-in threshold, else use the one from __init__
+        thr = (
+            f_stat_threshold
+            if f_stat_threshold is not None
+            else self.f_stat_threshold
+        )
         refined_usage_df = self.evaluate_pas_usage_models(
             raw_cov_df,
             output_debug_json,
             n_procs=n_procs,
             max_pas_count=max_pas_count,
-            f_stat_threshold=f_stat_threshold,
+            f_stat_threshold=thr,
         )
+
+        # free memory from raw coverage arrays
+        del raw_cov_df
+        import gc
+
+        gc.collect()
+
+        # Step 3: per-segment expression stats (if BAM provided)
+        if self.bam_file:
+            refined_usage_df = self.calculate_segment_expression_stats(
+                refined_usage_df, subsegments_df
+            )
+
+        # Final write
         self.write_coverage_results(refined_usage_df, output_final_tsv)
 
         end_time = time.time()

@@ -30,7 +30,9 @@ class PAQR3:
         output_dir,
         downstream_exon_extension,
         merge_distance,
-        max_pas_count,  # New parameter
+        max_pas_count,
+        bam_file=None,
+        f_stat_threshold=100,
     ):
         self.annotation_file = annotation_file
         self.pas_atlas_file = pas_atlas_file
@@ -40,6 +42,8 @@ class PAQR3:
         self.downstream_exon_extension = downstream_exon_extension
         self.merge_distance = merge_distance
         self.max_pas_count = max_pas_count
+        self.bam_file = bam_file
+        self.f_stat_threshold = f_stat_threshold
 
     def run(self):
         sample_name_pos = os.path.basename(self.coverage_bw_pos).split(".")[0]
@@ -85,7 +89,10 @@ class PAQR3:
 
         # Calculate coverages and usage
         calculate_coverages = CalculateCoverages(
-            self.coverage_bw_pos, self.coverage_bw_neg
+            self.coverage_bw_pos,
+            self.coverage_bw_neg,
+            bam_file=self.bam_file,
+            f_stat_threshold=self.f_stat_threshold,
         )
         subsegments_df = construct_segments.create_subsegments_dataframe()
 
@@ -94,7 +101,8 @@ class PAQR3:
             output_raw_tsv=output_coverage_tsv,
             output_final_tsv=output_usage_tsv,
             output_debug_json=output_debug_json,
-            max_pas_count=self.max_pas_count,  # Pass new parameter
+            max_pas_count=self.max_pas_count,
+            f_stat_threshold=self.f_stat_threshold,
         )
 
         log_message("PAQR3 pipeline completed.")
