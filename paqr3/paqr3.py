@@ -1,15 +1,17 @@
 import logging
 import os
+
 from paqr3.construct_segments import ConstructSegments, log_message
 from paqr3.calculate_cov_metrics import CalculateCoverages
+from paqr3.calculate_posterior_usage import CalculatePosteriorUsage
 
+# ——————————————— Logging setup —————————————————
 logging.basicConfig(
     format="[{asctime}] {message}",
     style="{",
     datefmt="%Y-%m-%d %H:%M:%S",
     level=logging.INFO,
 )
-
 logging.getLogger().handlers.clear()
 handler = logging.StreamHandler()
 formatter = logging.Formatter(
@@ -46,63 +48,68 @@ class PAQR3:
         self.f_stat_threshold = f_stat_threshold
 
     def run(self):
-        sample_name_pos = os.path.basename(self.coverage_bw_pos).split(".")[0]
-        sample_name_neg = os.path.basename(self.coverage_bw_neg).split(".")[0]
-
-        if sample_name_pos != sample_name_neg:
+        # 1) Sample name / output folder
+        sample_name = os.path.basename(self.coverage_bw_pos).split(".")[0]
+        if sample_name != os.path.basename(self.coverage_bw_neg).split(".")[0]:
             raise ValueError("Coverage files must have the same sample name.")
 
-        sample_name = sample_name_pos
-        output_dir = os.path.join(self.output_dir, f"{sample_name}_results")
-        os.makedirs(output_dir, exist_ok=True)
+        results_dir = os.path.join(self.output_dir, f"{sample_name}_results")
+        os.makedirs(results_dir, exist_ok=True)
 
-        # Output paths
-        output_genes_bed = os.path.join(output_dir, f"{sample_name}_genes.bed")
-        output_segments_bed = os.path.join(
-            output_dir, f"{sample_name}_segments.bed"
+        # 2) Paths for intermediate outputs
+        genes_bed = os.path.join(results_dir, f"{sample_name}_genes.bed")
+        segments_bed = os.path.join(results_dir, f"{sample_name}_segments.bed")
+        subsegments_bed = os.path.join(
+            results_dir, f"{sample_name}_subsegments.bed"
         )
-        output_subsegments_bed = os.path.join(
-            output_dir, f"{sample_name}_subsegments.bed"
-        )
-        output_pas_bed = os.path.join(output_dir, f"{sample_name}_PAS.bed")
-        output_coverage_tsv = os.path.join(
-            output_dir, f"{sample_name}_coverage.tsv"
-        )
-        output_usage_tsv = os.path.join(output_dir, f"{sample_name}_usage.tsv")
-        output_debug_json = os.path.join(
-            output_dir, f"{sample_name}_debug.json"
-        )
+        pas_bed = os.path.join(results_dir, f"{sample_name}_PAS.bed")
+        coverage_tsv = os.path.join(results_dir, f"{sample_name}_coverage.tsv")
+        usage_tsv = os.path.join(results_dir, f"{sample_name}_usage.tsv")
+        debug_json = os.path.join(results_dir, f"{sample_name}_debug.json")
 
-        # Construct segments
-        construct_segments = ConstructSegments(
+        # 3) Build segments + subsegments
+        cs = ConstructSegments(
             self.annotation_file,
             self.pas_atlas_file,
             self.downstream_exon_extension,
         )
-        construct_segments.run(
-            output_genes_bed,
-            output_segments_bed,
-            output_subsegments_bed,
-            output_pas_bed,
+        cs.run(
+            genes_bed,
+            segments_bed,
+            subsegments_bed,
+            pas_bed,
             self.merge_distance,
         )
+        subsegments_df = cs.create_subsegments_dataframe()
 
-        # Calculate coverages and usage
-        calculate_coverages = CalculateCoverages(
+        # 4) Compute coverage + F-stat usage
+        cc = CalculateCoverages(
             self.coverage_bw_pos,
             self.coverage_bw_neg,
             bam_file=self.bam_file,
             f_stat_threshold=self.f_stat_threshold,
         )
-        subsegments_df = construct_segments.create_subsegments_dataframe()
-
-        calculate_coverages.run(
+        refined_usage_df = cc.run(
             subsegments_df,
-            output_raw_tsv=output_coverage_tsv,
-            output_final_tsv=output_usage_tsv,
-            output_debug_json=output_debug_json,
+            output_raw_tsv=coverage_tsv,
+            output_final_tsv=usage_tsv,
+            output_debug_json=debug_json,
             max_pas_count=self.max_pas_count,
             f_stat_threshold=self.f_stat_threshold,
         )
+
+        # 5) Grab the merged PAS DataFrame (with atlas RPM) from ConstructSegments
+        atlas_df = cs.pas_df[["pas_id", "atlas_rpm"]].copy()
+
+        # 6) Compute Bayesian‐style posterior usage
+        cpu = CalculatePosteriorUsage(atlas_df)
+        posterior_df = cpu.compute(refined_usage_df)
+
+        # 7) Write out posterior usage for comparison
+        posterior_tsv = os.path.join(
+            results_dir, f"{sample_name}_posterior_usage.tsv"
+        )
+        posterior_df.to_csv(posterior_tsv, sep="\t", index=False)
+        log_message(f"Posterior usage written to {posterior_tsv}")
 
         log_message("PAQR3 pipeline completed.")

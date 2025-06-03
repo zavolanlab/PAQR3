@@ -680,3 +680,5 @@ class CalculateCoverages:
         end_time = time.time()
         log_message("PAS usage evaluation complete.")
         log_message(f"Total runtime: {end_time - start_time:.2f} seconds")
+
+        return refined_usage_df
