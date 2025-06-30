@@ -62,6 +62,32 @@ def main():
         help="Only evaluate segments with this number or fewer PAS.",
     )
     parser.add_argument(
+        "--bam",
+        "-b",
+        type=str,
+        default=None,
+        help="Path to the aligned RNA-Seq BAM file for segment read counts (optional).",
+    )
+    parser.add_argument(
+        "--f_stat_threshold",
+        "-fst",
+        type=int,
+        default=100,
+        help="F-statistic threshold for PAS usage evaluation.",
+    )
+    parser.add_argument(
+        "--posterior_usage_weight",
+        "-puw",
+        type=float,
+        default=0.1,
+        help="Weight to combine RNA-seq and atlas RPMs for posterior PAS usage (default: 0.1)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug output (default: off)",
+    )
+    parser.add_argument(
         "--version",
         "-v",
         action="version",
@@ -84,7 +110,11 @@ def main():
         args.output_dir,
         args.downstream_exon_extension,
         args.merge_distance,
-        args.max_pas_count,  # New parameter
+        args.max_pas_count,
+        args.bam,
+        args.f_stat_threshold,
+        args.posterior_usage_weight,
+        args.debug,
     )
     paqr3_instance.run()
 
