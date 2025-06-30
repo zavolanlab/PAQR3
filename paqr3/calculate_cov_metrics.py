@@ -7,9 +7,12 @@ import json
 import time
 import concurrent.futures
 import pysam  # type: ignore
+import warnings
 from functools import partial
 from scipy.stats import f  # type: ignore
 from pybedtools import BedTool  # type: ignore
+
+warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
 
 
 def log_message(message):
@@ -30,7 +33,7 @@ def json_serial(obj):
 def evaluate_all_pas_usage_patterns(
     subsegments,
     segment_id,
-    debug=True,
+    debug=False,
     max_pas_count=10,
     f_stat_threshold=100,
 ):
@@ -40,7 +43,6 @@ def evaluate_all_pas_usage_patterns(
     and compute drops, usage, and monotonicity from that union pattern.
     For segments with exactly one PAS, assigns usage=1.0 if coverage>0.
     """
-    log = logging.info
 
     coverage_arrays = [s["coverage"] for s in subsegments]
     pas_ids = [str(s["pas_id"]) for s in subsegments]
@@ -51,9 +53,8 @@ def evaluate_all_pas_usage_patterns(
 
     # 1) Early exit if all coverage zero
     if all(mu == 0 for mu in computed_means):
-        msg = f"[{segment_id}] All subsegment coverages are 0 → Assign usage = 0 to all PAS"
-        log(msg)
         if debug:
+            msg = f"[{segment_id}] All subsegment coverages are 0 → Assign usage = 0 to all PAS"
             logging.info("DEBUG: " + msg)
         zero_drops = [0.0] * len(unique_pas_ids)
         return {
@@ -102,20 +103,18 @@ def evaluate_all_pas_usage_patterns(
 
     # 3) Too many PAS? skip
     if len(unique_pas_ids) > max_pas_count:
-        msg = (
-            f"[{segment_id}] Too many PAS ({len(unique_pas_ids)}) in this segment; "
-            f"only segments with {max_pas_count} or fewer PAS are evaluated. Skipping."
-        )
-        log(msg)
         if debug:
+            msg = (
+                f"[{segment_id}] Too many PAS ({len(unique_pas_ids)}) in this segment; "
+                f"only segments with {max_pas_count} or fewer PAS are evaluated. Skipping."
+            )
             logging.info("DEBUG: " + msg)
         return None
 
     # 4) No PAS at all? skip
     if not unique_pas_ids:
-        msg = f"[{segment_id}] No PAS found in this segment, skipping."
-        log(msg)
         if debug:
+            msg = f"[{segment_id}] No PAS found in this segment, skipping."
             logging.info("DEBUG: " + msg)
         return None
 
@@ -182,7 +181,13 @@ def evaluate_all_pas_usage_patterns(
             for g, gm in zip(groups, group_means)
         )
         df_b, df_w = len(groups) - 1, len(all_covs) - len(groups)
-        if df_w == 0 or ss_within == 0:
+        if (
+            df_b == 0
+            or df_w == 0
+            or ss_within == 0
+            or np.isnan(ss_within)
+            or np.isnan(ss_between)
+        ):
             f_stat, p_val = 0.0, None
         else:
             f_stat = (ss_between / df_b) / (ss_within / df_w)
@@ -198,9 +203,8 @@ def evaluate_all_pas_usage_patterns(
 
     # 6) If none passed, skip
     if not combos_info:
-        msg = f"[{segment_id}] No PAS combinations met the F-stat threshold; skipping segment."
-        log(msg)
         if debug:
+            msg = f"[{segment_id}] No PAS combinations met the F-stat threshold; skipping segment."
             logging.info("DEBUG: " + msg)
         return None
 
@@ -317,7 +321,7 @@ def compute_drops_and_usage(group):
 
 def process_segment(
     segment_tuple,
-    debug=True,
+    debug=False,
     max_pas_count=10,
     f_stat_threshold=100,
 ):
@@ -397,6 +401,7 @@ class CalculateCoverages:
         n_procs=8,
         max_pas_count=10,
         f_stat_threshold=100,
+        debug=False,
     ):
         usage_rows = []
         debug_rows = []
@@ -408,7 +413,7 @@ class CalculateCoverages:
             ) as executor:
                 func = partial(
                     process_segment,
-                    debug=True,
+                    debug=debug,
                     max_pas_count=max_pas_count,
                     f_stat_threshold=f_stat_threshold,
                 )
@@ -459,7 +464,7 @@ class CalculateCoverages:
                 result = evaluate_all_pas_usage_patterns(
                     subsegments,
                     segment_id,
-                    debug=True,
+                    debug=debug,
                     max_pas_count=max_pas_count,
                     f_stat_threshold=f_stat_threshold,
                 )
@@ -635,15 +640,46 @@ class CalculateCoverages:
         n_procs=8,
         max_pas_count=10,
         f_stat_threshold=None,
+        debug=False,
     ):
         start_time = time.time()
 
         # Step 1: initial coverage metrics
         log_message("Step 1: Calculating initial coverage metrics...")
         raw_cov_df = self.calculate_coverage_metrics(subsegments_df)
-        cov_df = raw_cov_df.groupby(
+
+        grouped = raw_cov_df.groupby(
             ["gene_id", "segment_id"], group_keys=False
-        ).apply(compute_drops_and_usage)
+        )
+
+        results = [
+            compute_drops_and_usage(group)
+            for _, group in grouped
+            if not group["mean_cov"].isna().all()
+        ]
+
+        # Filter out empty or all-NA DataFrames before concatenation
+        cov_df = (
+            pd.concat(
+                [
+                    r
+                    for r in results
+                    if not r.empty and not r.isna().all().all()
+                ],
+                ignore_index=True,
+            )
+            if results
+            else pd.DataFrame(
+                columns=raw_cov_df.columns.tolist()
+                + [
+                    "rna_drop_cov",
+                    "rna_sum_drop_cov",
+                    "rna_monotone",
+                    "rna_usage",
+                ]
+            )
+        )
+
         self.write_coverage_results(cov_df.copy(), output_raw_tsv)
 
         # Step 2: PAS usage via F-statistics
@@ -660,6 +696,7 @@ class CalculateCoverages:
             n_procs=n_procs,
             max_pas_count=max_pas_count,
             f_stat_threshold=thr,
+            debug=debug,
         )
 
         # free memory from raw coverage arrays

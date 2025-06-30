@@ -24,7 +24,6 @@ class CalculatePosteriorUsage:
 
         # 1) observed RPM from drop
         total_drop = df["rna_drop_cov"].sum()
-        log_message(f"Total rna_drop_cov sum = {total_drop:.3f}")
         df["observed_rpm"] = (
             df["rna_drop_cov"] / total_drop * 1e6 if total_drop > 0 else 0.0
         )

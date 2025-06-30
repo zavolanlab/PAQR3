@@ -5,7 +5,7 @@ from paqr3.construct_segments import ConstructSegments, log_message
 from paqr3.calculate_cov_metrics import CalculateCoverages
 from paqr3.calculate_posterior_usage import CalculatePosteriorUsage
 
-# ——————————————— Logging setup —————————————————
+# ———————————————— Logging setup ————————————————
 logging.basicConfig(
     format="[{asctime}] {message}",
     style="{",
@@ -36,6 +36,7 @@ class PAQR3:
         bam_file=None,
         f_stat_threshold=100,
         posterior_usage_weight=0.1,
+        debug=False,
     ):
         self.annotation_file = annotation_file
         self.pas_atlas_file = pas_atlas_file
@@ -48,6 +49,7 @@ class PAQR3:
         self.bam_file = bam_file
         self.f_stat_threshold = f_stat_threshold
         self.posterior_usage_weight = posterior_usage_weight
+        self.debug = debug
 
     def run(self):
         # 1) Sample name / output folder
@@ -95,9 +97,10 @@ class PAQR3:
             subsegments_df,
             output_raw_tsv=coverage_tsv,
             output_final_tsv=usage_tsv,
-            output_debug_json=debug_json,
+            output_debug_json=debug_json if self.debug else None,
             max_pas_count=self.max_pas_count,
             f_stat_threshold=self.f_stat_threshold,
+            debug=self.debug,
         )
 
         # 5) Grab the merged PAS DataFrame (with atlas RPM) from ConstructSegments

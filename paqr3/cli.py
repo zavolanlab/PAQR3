@@ -80,7 +80,12 @@ def main():
         "-puw",
         type=float,
         default=0.1,
-        help="Weight for RNA-seq-derived RPM when computing posterior PAS usage (default: 0.1).",
+        help="Weight to combine RNA-seq and atlas RPMs for posterior PAS usage (default: 0.1)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug output (default: off)",
     )
     parser.add_argument(
         "--version",
@@ -109,6 +114,7 @@ def main():
         args.bam,
         args.f_stat_threshold,
         args.posterior_usage_weight,
+        args.debug,
     )
     paqr3_instance.run()
 
