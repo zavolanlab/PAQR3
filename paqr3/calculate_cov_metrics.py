@@ -701,10 +701,6 @@ class CalculateCoverages:
 
         # free memory from raw coverage arrays
         del raw_cov_df
-        import gc
-
-        gc.collect()
-
         # Step 3: per-segment expression stats (if BAM provided)
         if self.bam_file:
             refined_usage_df = self.calculate_segment_expression_stats(
