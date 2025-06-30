@@ -35,6 +35,7 @@ class PAQR3:
         max_pas_count,
         bam_file=None,
         f_stat_threshold=100,
+        posterior_usage_weight=0.1,
     ):
         self.annotation_file = annotation_file
         self.pas_atlas_file = pas_atlas_file
@@ -46,6 +47,7 @@ class PAQR3:
         self.max_pas_count = max_pas_count
         self.bam_file = bam_file
         self.f_stat_threshold = f_stat_threshold
+        self.posterior_usage_weight = posterior_usage_weight
 
     def run(self):
         # 1) Sample name / output folder
@@ -102,7 +104,9 @@ class PAQR3:
         atlas_df = cs.pas_df[["pas_id", "atlas_rpm"]].copy()
 
         # 6) Compute Bayesian‐style posterior usage
-        cpu = CalculatePosteriorUsage(atlas_df)
+        cpu = CalculatePosteriorUsage(
+            atlas_df, weight=self.posterior_usage_weight
+        )
         posterior_df = cpu.compute(refined_usage_df)
 
         # 7) Write out posterior usage for comparison

@@ -76,6 +76,13 @@ def main():
         help="F-statistic threshold for PAS usage evaluation.",
     )
     parser.add_argument(
+        "--posterior_usage_weight",
+        "-puw",
+        type=float,
+        default=0.1,
+        help="Weight for RNA-seq-derived RPM when computing posterior PAS usage (default: 0.1).",
+    )
+    parser.add_argument(
         "--version",
         "-v",
         action="version",
@@ -101,6 +108,7 @@ def main():
         args.max_pas_count,
         args.bam,
         args.f_stat_threshold,
+        args.posterior_usage_weight,
     )
     paqr3_instance.run()
 
