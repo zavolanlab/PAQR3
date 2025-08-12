@@ -337,8 +337,21 @@ class ConstructSegments:
                 exons = [
                     r for r in transcript.regions if r.region_type == "exon"
                 ]
-                introns = []
 
+                # Mark terminal exon per transcript (post-extension, strand-aware)
+                if exons:
+                    if transcript.strand == "+":
+                        max_end = max(e.end for e in exons)
+                        for e in exons:
+                            e.attributes["is_terminal_exon"] = e.end == max_end
+                    else:
+                        min_start = min(e.start for e in exons)
+                        for e in exons:
+                            e.attributes["is_terminal_exon"] = (
+                                e.start == min_start
+                            )
+
+                introns = []
                 for i in range(len(exons) - 1):
                     exon1 = exons[i]
                     exon2 = exons[i + 1]
@@ -397,27 +410,14 @@ class ConstructSegments:
                 else float("-inf")
             )
 
+            # Collect terminal exon boundaries to suppress end-splitting
             terminal_exons_ends = set()
             terminal_exons_starts = set()
             for transcript in gene.transcripts.values():
                 for region in transcript.regions:
                     if region.region_type == "exon":
-                        is_terminal = (
-                            region.strand == "+"
-                            and region.end
-                            == max(
-                                r.end
-                                for r in transcript.regions
-                                if r.region_type == "exon"
-                            )
-                        ) or (
-                            region.strand == "-"
-                            and region.start
-                            == min(
-                                r.start
-                                for r in transcript.regions
-                                if r.region_type == "exon"
-                            )
+                        is_terminal = bool(
+                            region.attributes.get("is_terminal_exon", False)
                         )
                         if is_terminal:
                             if region.strand == "+":
@@ -467,8 +467,51 @@ class ConstructSegments:
             if strand == "-":
                 segments.reverse()
 
+            # Precompute region collections for origin labeling
+            gene_introns = []
+            gene_exons = []
+            gene_terminal_exons = []
+            for transcript in gene.transcripts.values():
+                for r in transcript.regions:
+                    if r.region_type == "intron":
+                        gene_introns.append(r)
+                    elif r.region_type == "exon":
+                        gene_exons.append(r)
+                        if r.attributes.get("is_terminal_exon", False):
+                            gene_terminal_exons.append(r)
+
+            def _overlaps(a_start, a_end, b_start, b_end):
+                # Half-open style
+                return (a_start < b_end) and (b_start < a_end)
+
+            # Assign numbers + origin label
             for i, segment in enumerate(segments):
                 segment.attributes["segment_number"] = i + 1
+
+                # Origin priority IN > TE > EX
+                seg_s, seg_e = segment.start, segment.end
+
+                is_intron = any(
+                    _overlaps(seg_s, seg_e, r.start, r.end)
+                    for r in gene_introns
+                )
+                if is_intron:
+                    segment.attributes["segment_origin"] = "IN"
+                else:
+                    is_te = any(
+                        _overlaps(seg_s, seg_e, r.start, r.end)
+                        for r in gene_terminal_exons
+                    )
+                    if is_te:
+                        segment.attributes["segment_origin"] = "TE"
+                    else:
+                        is_exon = any(
+                            _overlaps(seg_s, seg_e, r.start, r.end)
+                            for r in gene_exons
+                        )
+                        segment.attributes["segment_origin"] = (
+                            "EX" if is_exon else "EX"
+                        )
 
             gene.segments = segments
 
@@ -674,7 +717,7 @@ class ConstructSegments:
     def write_segments_pas_to_bed(
         self, out_genes_bed, out_segments_bed, out_subsegments_bed, out_pas_bed
     ):
-        """Writes genes, segments, subsegments, and merged PAS to BED files."""
+        """Writes genes, segments, subsegments, and merged PAS to BED/TSV files."""
         gene_mapping = {}
         unique_gene_id = 1
         genes_data = []
@@ -726,6 +769,7 @@ class ConstructSegments:
                     if overlapping
                     else "."
                 )
+                origin = segment.attributes.get("segment_origin", "EX")
                 segments_data.append(
                     [
                         segment.chrom,
@@ -733,7 +777,8 @@ class ConstructSegments:
                         segment.end,
                         f"{gid}.{segment.attributes['segment_number']}",
                         overlaps,
-                        segment.strand,
+                        segment.strand,  # keep strand as 6th column
+                        origin,  # new 7th column
                     ]
                 )
                 if hasattr(segment, "subsegments"):
@@ -745,7 +790,8 @@ class ConstructSegments:
                                 sub.end,
                                 f"{gid}.{segment.attributes['segment_number']}.{sub.attributes['subsegment_number']}",
                                 ".",
-                                sub.strand,
+                                sub.strand,  # keep strand as 6th column
+                                origin,  # new 7th column, inherited from parent segment
                             ]
                         )
 
@@ -769,6 +815,7 @@ class ConstructSegments:
                 "gene_segment_id",
                 "overlapping_pas",
                 "strand",
+                "segment_origin",
             ],
         )
         subsegments_df = pd.DataFrame(
@@ -780,6 +827,7 @@ class ConstructSegments:
                 "gene_segment_subsegment_id",
                 "score",
                 "strand",
+                "segment_origin",
             ],
         )
 
