@@ -19,7 +19,7 @@ class ConstructSegments:
         self.downstream_exon_extension = downstream_exon_extension
         self.genes = {}
         self.gene_mapping = {}
-        # After process_pas_atlas, this will hold per‐PAS info including merged RPM
+        # After process_pas_atlas, this will hold per‐PAS info including merged RPM and rep_cs
         self.pas_df = None
 
     def parse_gtf_to_genes(self, gtf_data):
@@ -519,7 +519,9 @@ class ConstructSegments:
         """
         Read the PAS‐atlas BED file, merge sites within merge_distance bp,
         compute mean RPM for merged sites, assign new IDs, and build an interval tree.
-        Stores resulting PAS info in self.pas_df (columns: pas_id, chrom, start, end, strand, atlas_rpm).
+        Also select a representative cleavage site (rep_cs) per merged PAS as the site
+        within the cluster with the highest RPM (midpoint if interval >1bp).
+        Stores resulting PAS info in self.pas_df (columns: pas_id, chrom, start, end, strand, atlas_rpm, rep_cs).
         """
         log_message("Reading PAS atlas...")
         pas_bed = BedTool(self.pas_atlas_file)
@@ -535,12 +537,18 @@ class ConstructSegments:
         current_start = None
         current_end = None
         rpm_values = []
+
+        # track representative site within cluster
+        rep_start = None
+        rep_end = None
+        rep_rpm = None
+
         for pas in pas_sorted:
             chrom = pas.chrom
             start = int(pas.start)
             end = int(pas.end)
             strand = pas.strand
-            # 5th column is RPM
+            # 5th column treated as RPM; fallback 0.0
             try:
                 rpm = float(pas.fields[4])
             except (ValueError, IndexError):
@@ -553,6 +561,7 @@ class ConstructSegments:
                 current_start = start
                 current_end = end
                 rpm_values = [rpm]
+                rep_start, rep_end, rep_rpm = start, end, rpm
             elif (
                 chrom == current_chrom
                 and strand == current_strand
@@ -561,9 +570,19 @@ class ConstructSegments:
                 # extend cluster
                 current_end = max(current_end, end)
                 rpm_values.append(rpm)
+                # update representative site if needed
+                if rep_rpm is None or rpm > rep_rpm:
+                    rep_start, rep_end, rep_rpm = start, end, rpm
             else:
                 # finalize previous cluster
                 mean_rpm = sum(rpm_values) / len(rpm_values)
+                # compute a representative cleavage coordinate
+                rep_pos = (
+                    rep_start
+                    if rep_end == rep_start
+                    else (rep_start + rep_end) // 2
+                )
+                rep_cs = f"{current_chrom}:{rep_pos}:{current_strand}"
                 merged_sites.append(
                     (
                         current_chrom,
@@ -571,6 +590,7 @@ class ConstructSegments:
                         current_end,
                         current_strand,
                         mean_rpm,
+                        rep_cs,
                     )
                 )
                 # start new cluster
@@ -579,10 +599,17 @@ class ConstructSegments:
                 current_start = start
                 current_end = end
                 rpm_values = [rpm]
+                rep_start, rep_end, rep_rpm = start, end, rpm
 
         # finalize last
         if current_start is not None:
             mean_rpm = sum(rpm_values) / len(rpm_values)
+            rep_pos = (
+                rep_start
+                if rep_end == rep_start
+                else (rep_start + rep_end) // 2
+            )
+            rep_cs = f"{current_chrom}:{rep_pos}:{current_strand}"
             merged_sites.append(
                 (
                     current_chrom,
@@ -590,6 +617,7 @@ class ConstructSegments:
                     current_end,
                     current_strand,
                     mean_rpm,
+                    rep_cs,
                 )
             )
 
@@ -597,11 +625,13 @@ class ConstructSegments:
         pas_trees = {}
         pas_records = (
             []
-        )  # list of [pas_id, chrom, start, end, strand, atlas_rpm]
+        )  # [pas_id, chrom, start, end, strand, atlas_rpm, rep_cs]
         unique_pas_id = 1
-        for chrom, start, end, strand, atlas_rpm in merged_sites:
+        for chrom, start, end, strand, atlas_rpm, rep_cs in merged_sites:
             pas_id = unique_pas_id
-            pas_records.append([pas_id, chrom, start, end, strand, atlas_rpm])
+            pas_records.append(
+                [pas_id, chrom, start, end, strand, atlas_rpm, rep_cs]
+            )
 
             if (chrom, strand) not in pas_trees:
                 pas_trees[(chrom, strand)] = IntervalTree()
@@ -612,7 +642,15 @@ class ConstructSegments:
         # Save DataFrame for downstream use
         self.pas_df = pd.DataFrame(
             pas_records,
-            columns=["pas_id", "chrom", "start", "end", "strand", "atlas_rpm"],
+            columns=[
+                "pas_id",
+                "chrom",
+                "start",
+                "end",
+                "strand",
+                "atlas_rpm",
+                "rep_cs",
+            ],
         )
 
         return pas_trees
@@ -620,7 +658,9 @@ class ConstructSegments:
     def identify_pas_in_segments(self, pas_trees):
         """
         Identifies merged PAS sites overlapping segments and constructs subsegments.
-        Assigns the merged pas_id to each subsegment.
+        Subsegments are the gaps preceding each PAS (plus the final tail).
+        The subsegment before PAS_i gets pas_id_i; the final tail gets '.'.
+        On '-' strand, order is reversed so the first subsegment corresponds to the highest-coordinate PAS.
         """
         log_message(
             "Identifying PAS overlaps with segments and constructing subsegments..."
@@ -636,30 +676,56 @@ class ConstructSegments:
                 overlapping_pas_ids = []
                 subsegments = []
 
-                if (chrom, strand) in pas_trees:
+                has_tree = (chrom, strand) in pas_trees
+                if has_tree:
+                    # intervals fully contained in the segment
                     intervals = pas_trees[(chrom, strand)][seg_start:seg_end]
-                    sorted_intervals = sorted(
-                        [
-                            iv
-                            for iv in intervals
-                            if iv.begin >= seg_start and iv.end <= seg_end
-                        ],
-                        key=lambda x: x.begin,
-                    )
+                    contained = [
+                        iv
+                        for iv in intervals
+                        if iv.begin >= seg_start and iv.end <= seg_end
+                    ]
+                    if contained:
+                        sorted_intervals = sorted(
+                            contained, key=lambda x: x.begin
+                        )
+                        current_start = seg_start
+                        for iv in sorted_intervals:
+                            iv_start = iv.begin
+                            iv_end = iv.end
+                            pas_id = iv.data
 
-                    current_start = seg_start
-                    for iv in sorted_intervals:
-                        iv_start = iv.begin
-                        iv_end = iv.end
-                        pas_id = iv.data
+                            # subsegment BEFORE this PAS
+                            if iv_start > current_start:
+                                subsegments.append(
+                                    Region(
+                                        region_type="subsegment",
+                                        chrom=chrom,
+                                        start=current_start,
+                                        end=iv_start,
+                                        strand=strand,
+                                        attributes={
+                                            "gene_id": gene.gene_id,
+                                            "segment_id": segment.attributes[
+                                                "segment_number"
+                                            ],
+                                            "strand": strand,
+                                            "pas_id": None,  # filled later
+                                        },
+                                    )
+                                )
+                            # next subsegment starts after PAS interval
+                            current_start = iv_end
+                            overlapping_pas_ids.append(pas_id)
 
-                        if iv_start > current_start:
+                        # final tail (after last PAS)
+                        if current_start < seg_end:
                             subsegments.append(
                                 Region(
                                     region_type="subsegment",
                                     chrom=chrom,
                                     start=current_start,
-                                    end=iv_start,
+                                    end=seg_end,
                                     strand=strand,
                                     attributes={
                                         "gene_id": gene.gene_id,
@@ -667,47 +733,26 @@ class ConstructSegments:
                                             "segment_number"
                                         ],
                                         "strand": strand,
-                                        "pas_id": None,
+                                        "pas_id": None,  # will become '.'
                                     },
                                 )
                             )
-                        current_start = iv_end
-                        overlapping_pas_ids.append(pas_id)
 
-                    if current_start < seg_end:
-                        subsegments.append(
-                            Region(
-                                region_type="subsegment",
-                                chrom=chrom,
-                                start=current_start,
-                                end=seg_end,
-                                strand=strand,
-                                attributes={
-                                    "gene_id": gene.gene_id,
-                                    "segment_id": segment.attributes[
-                                        "segment_number"
-                                    ],
-                                    "strand": strand,
-                                    "pas_id": None,
-                                },
-                            )
-                        )
+                # If no PAS contained, do NOT create subsegments for this segment
+                if not subsegments:
+                    segment.attributes["overlapping_pas"] = []
+                    continue
 
+                # Strand-specific ordering: make subsegments and PAS IDs align from transcript direction
                 if strand == "-":
                     subsegments.reverse()
+                    overlapping_pas_ids.reverse()
 
+                # Number subsegments and assign PAS IDs: for i < len(pas_ids) → that PAS; else '.'
                 for i, sub in enumerate(subsegments):
                     sub.attributes["subsegment_number"] = i + 1
-                    # assign pas_id in order
-                    pas_index = (
-                        i
-                        if strand == "+"
-                        else len(overlapping_pas_ids) - 1 - i
-                    )
-                    if 0 <= pas_index < len(overlapping_pas_ids):
-                        sub.attributes["pas_id"] = overlapping_pas_ids[
-                            pas_index
-                        ]
+                    if i < len(overlapping_pas_ids):
+                        sub.attributes["pas_id"] = overlapping_pas_ids[i]
                     else:
                         sub.attributes["pas_id"] = "."
 
@@ -724,10 +769,10 @@ class ConstructSegments:
         segments_data = []
         subsegments_data = []
 
+        # PAS output: chrom, start, end, pas_id, rep_cs, strand
         pas_bed_df = self.pas_df[
-            ["chrom", "start", "end", "pas_id", "atlas_rpm", "strand"]
+            ["chrom", "start", "end", "pas_id", "rep_cs", "strand"]
         ]
-        # output columns: chrom, start, end, pas_id, atlas_rpm, strand
         pas_bed_df.to_csv(out_pas_bed, sep="\t", index=False, header=False)
 
         for gene in self.genes.values():
@@ -777,21 +822,22 @@ class ConstructSegments:
                         segment.end,
                         f"{gid}.{segment.attributes['segment_number']}",
                         overlaps,
-                        segment.strand,  # keep strand as 6th column
-                        origin,  # new 7th column
+                        segment.strand,  # 6th
+                        origin,  # 7th
                     ]
                 )
                 if hasattr(segment, "subsegments"):
-                    for sub in segment.subsegments:
+                    for sub in getattr(segment, "subsegments", []):
+                        sub_pas_id = sub.attributes.get("pas_id", ".")
                         subsegments_data.append(
                             [
                                 sub.chrom,
                                 sub.start,
                                 sub.end,
                                 f"{gid}.{segment.attributes['segment_number']}.{sub.attributes['subsegment_number']}",
-                                ".",
-                                sub.strand,  # keep strand as 6th column
-                                origin,  # new 7th column, inherited from parent segment
+                                sub_pas_id,  # 5th: pas_id or '.'
+                                sub.strand,  # 6th
+                                origin,  # 7th
                             ]
                         )
 
@@ -825,7 +871,7 @@ class ConstructSegments:
                 "start",
                 "end",
                 "gene_segment_subsegment_id",
-                "score",
+                "pas_id",  # changed from 'score' to 'pas_id'
                 "strand",
                 "segment_origin",
             ],
@@ -850,7 +896,7 @@ class ConstructSegments:
         for gene in self.genes.values():
             for segment in gene.segments:
                 if hasattr(segment, "subsegments"):
-                    for sub in segment.subsegments:
+                    for sub in getattr(segment, "subsegments", []):
                         if sub.end - sub.start > 0:
                             rows.append(
                                 [
