@@ -4,8 +4,9 @@ import os
 from paqr3.construct_segments import ConstructSegments, log_message
 from paqr3.calculate_cov_metrics import CalculateCoverages
 from paqr3.calculate_posterior_usage import CalculatePosteriorUsage
+from paqr3.calculate_gene_level_usages import CalculateGeneLevelUsage
 
-# ———————————————— Logging setup ————————————————
+# ——————————— Logging setup ———————————
 logging.basicConfig(
     format="[{asctime}] {message}",
     style="{",
@@ -106,7 +107,7 @@ class PAQR3:
         # 5) Grab the merged PAS DataFrame (with atlas RPM) from ConstructSegments
         atlas_df = cs.pas_df[["pas_id", "atlas_rpm"]].copy()
 
-        # 6) Compute Bayesian‐style posterior usage
+        # 6) Compute Bayesian-style posterior usage
         cpu = CalculatePosteriorUsage(
             atlas_df, weight=self.posterior_usage_weight
         )
@@ -118,5 +119,15 @@ class PAQR3:
         )
         posterior_df.to_csv(posterior_tsv, sep="\t", index=False)
         log_message(f"Posterior usage written to {posterior_tsv}")
+
+        # 8) Compute gene-level PAS usage summary
+        gene_usage_calc = CalculateGeneLevelUsage(posterior_df)
+        gene_usage_df = gene_usage_calc.compute()
+
+        gene_usage_tsv = os.path.join(
+            results_dir, f"{sample_name}_gene_level_usage.tsv"
+        )
+        gene_usage_df.to_csv(gene_usage_tsv, sep="\t", index=False)
+        log_message(f"Gene-level usage written to {gene_usage_tsv}")
 
         log_message("PAQR3 pipeline completed.")
