@@ -21,6 +21,10 @@ from paqr3.models import Gene, Region, Transcript
 
 logger = logging.getLogger(__name__)
 
+# 0-based index of the RPM column in the PAS BED file (column 5 in
+# 1-based BED notation). Configurable here if the atlas format changes.
+_PAS_RPM_COL: int = 4
+
 # Columns excluded when building GTF attribute dicts.
 _GENE_SKIP_COLS: frozenset[str] = frozenset(
     {"seqname", "source", "feature", "start", "end", "score", "strand"}
@@ -567,6 +571,12 @@ class ConstructSegments:
         Results are stored in ``self.pas_df`` and also returned as a
         nested interval-tree structure for fast overlap queries.
 
+        The PAS BED file is sorted by ``(chrom, strand, start)`` before
+        merging; the merge loop relies on this order being strictly
+        maintained.  RPM values are read from column index
+        ``_PAS_RPM_COL`` (0-based); a warning is emitted and the value
+        defaults to ``0.0`` when that column is absent.
+
         Args:
             merge_distance: Maximum gap (in bp) between two PAS sites
                 that are still merged into the same cluster.
@@ -601,8 +611,18 @@ class ConstructSegments:
             end = int(pas.end)
             strand = pas.strand
             try:
-                rpm = float(pas.fields[4])
-            except (ValueError, IndexError):
+                rpm = float(pas.fields[_PAS_RPM_COL])
+            except ValueError:
+                rpm = 0.0
+            except IndexError:
+                logger.warning(
+                    "PAS entry %s:%s-%s has no column %d; "
+                    "defaulting RPM to 0.0",
+                    pas.chrom,
+                    pas.start,
+                    pas.end,
+                    _PAS_RPM_COL + 1,
+                )
                 rpm = 0.0
 
             if current_start is None:
@@ -739,8 +759,11 @@ class ConstructSegments:
                 overlapping_pas_ids: list[int] = []
                 subsegments: list[Region] = []
 
-                if (chrom, strand) in pas_trees:
-                    intervals = pas_trees[(chrom, strand)][seg_start:seg_end]
+                # Cache the lookup key to avoid constructing the tuple
+                # twice (once for `in`, once for indexing).
+                key = (chrom, strand)
+                if key in pas_trees:
+                    intervals = pas_trees[key][seg_start:seg_end]
                     contained = [
                         iv
                         for iv in intervals
@@ -848,9 +871,9 @@ class ConstructSegments:
         """
         gene_mapping: dict[str, int] = {}
         unique_gene_id = 1
-        genes_data: list[list] = []
-        segments_data: list[list] = []
-        subsegments_data: list[list] = []
+        genes_data: list[dict] = []
+        segments_data: list[dict] = []
+        subsegments_data: list[dict] = []
 
         assert (
             self.pas_df is not None
@@ -879,7 +902,14 @@ class ConstructSegments:
                 gene_start, gene_end = 0, 0
 
             genes_data.append(
-                [chrom, gene_start, gene_end, gid, gene.gene_id, strand]
+                {
+                    "chrom": chrom,
+                    "start": gene_start,
+                    "end": gene_end,
+                    "unique_gene_id": gid,
+                    "gene_id": gene.gene_id,
+                    "strand": strand,
+                }
             )
 
             for segment in gene.segments:
@@ -892,67 +922,37 @@ class ConstructSegments:
                 origin = segment.attributes.get("segment_origin", "EX")
                 seg_num = segment.attributes["segment_number"]
                 segments_data.append(
-                    [
-                        segment.chrom,
-                        segment.start,
-                        segment.end,
-                        f"{gid}.{seg_num}",
-                        overlaps,
-                        segment.strand,
-                        origin,
-                    ]
+                    {
+                        "chrom": segment.chrom,
+                        "start": segment.start,
+                        "end": segment.end,
+                        "gene_segment_id": f"{gid}.{seg_num}",
+                        "overlapping_pas": overlaps,
+                        "strand": segment.strand,
+                        "segment_origin": origin,
+                    }
                 )
                 if segment.subsegments:
                     for sub in segment.subsegments:
                         sub_num = sub.attributes["subsegment_number"]
                         sub_pas_id = sub.attributes.get("pas_id", ".")
                         subsegments_data.append(
-                            [
-                                sub.chrom,
-                                sub.start,
-                                sub.end,
-                                f"{gid}.{seg_num}.{sub_num}",
-                                sub_pas_id,
-                                sub.strand,
-                                origin,
-                            ]
+                            {
+                                "chrom": sub.chrom,
+                                "start": sub.start,
+                                "end": sub.end,
+                                "gene_segment_subsegment_id": (
+                                    f"{gid}.{seg_num}.{sub_num}"
+                                ),
+                                "pas_id": sub_pas_id,
+                                "strand": sub.strand,
+                                "segment_origin": origin,
+                            }
                         )
 
-        genes_df = pd.DataFrame(
-            genes_data,
-            columns=[
-                "chrom",
-                "start",
-                "end",
-                "unique_gene_id",
-                "gene_id",
-                "strand",
-            ],
-        )
-        segments_df = pd.DataFrame(
-            segments_data,
-            columns=[
-                "chrom",
-                "start",
-                "end",
-                "gene_segment_id",
-                "overlapping_pas",
-                "strand",
-                "segment_origin",
-            ],
-        )
-        subsegments_df = pd.DataFrame(
-            subsegments_data,
-            columns=[
-                "chrom",
-                "start",
-                "end",
-                "gene_segment_subsegment_id",
-                "pas_id",
-                "strand",
-                "segment_origin",
-            ],
-        )
+        genes_df = pd.DataFrame(genes_data)
+        segments_df = pd.DataFrame(segments_data)
+        subsegments_df = pd.DataFrame(subsegments_data)
 
         genes_df.to_csv(out_genes_bed, sep="\t", index=False, header=False)
         segments_df.to_csv(
@@ -983,7 +983,7 @@ class ConstructSegments:
             ``segment_number``, ``subsegment_number``, ``chrom``,
             ``start``, ``end``, ``strand``, ``pas_id``.
         """
-        rows: list[list] = []
+        rows: list[dict] = []
         for gene in self.genes.values():
             for segment in gene.segments:
                 if not segment.subsegments:
@@ -991,30 +991,24 @@ class ConstructSegments:
                 for sub in segment.subsegments:
                     if sub.end - sub.start > 0:
                         rows.append(
-                            [
-                                self.gene_mapping[gene.gene_id],
-                                segment.attributes["segment_number"],
-                                sub.attributes["subsegment_number"],
-                                sub.chrom,
-                                sub.start,
-                                sub.end,
-                                sub.strand,
-                                sub.attributes.get("pas_id", "."),
-                            ]
+                            {
+                                "gene_unique_id": (
+                                    self.gene_mapping[gene.gene_id]
+                                ),
+                                "segment_number": (
+                                    segment.attributes["segment_number"]
+                                ),
+                                "subsegment_number": (
+                                    sub.attributes["subsegment_number"]
+                                ),
+                                "chrom": sub.chrom,
+                                "start": sub.start,
+                                "end": sub.end,
+                                "strand": sub.strand,
+                                "pas_id": sub.attributes.get("pas_id", "."),
+                            }
                         )
-        return pd.DataFrame(
-            rows,
-            columns=[
-                "gene_unique_id",
-                "segment_number",
-                "subsegment_number",
-                "chrom",
-                "start",
-                "end",
-                "strand",
-                "pas_id",
-            ],
-        )
+        return pd.DataFrame(rows)
 
     def run(
         self,
