@@ -6,8 +6,10 @@ and Gene. Each class can serialise itself back to a GTF format string
 via ``to_gtf_format()``.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 
 @dataclass(slots=True)
@@ -24,6 +26,9 @@ class Region:
         intron_number: Intron index within the transcript, if
             applicable.
         attributes: Key-value pairs from the GTF attributes field.
+            Values may be strings, integers, booleans, or ``None``.
+        subsegments: Sub-segment regions nested within this region,
+            populated by the segment-construction pipeline.
     """
 
     region_type: str  # "exon" or "intron"
@@ -33,7 +38,8 @@ class Region:
     strand: str
     exon_number: Optional[int] = None
     intron_number: Optional[int] = None
-    attributes: dict[str, str] = field(default_factory=dict)
+    attributes: dict[str, Any] = field(default_factory=dict)
+    subsegments: list[Region] = field(default_factory=list)
 
     def to_gtf_format(self) -> str:
         """Convert the Region to a GTF format string.
@@ -85,12 +91,13 @@ class Transcript:
         regions: Ordered list of exon/intron regions belonging to this
             transcript.
         attributes: Key-value pairs from the GTF attributes field.
+            Values may be strings, integers, booleans, or ``None``.
     """
 
     transcript_id: str
     strand: str
     regions: list[Region] = field(default_factory=list)
-    attributes: dict[str, str] = field(default_factory=dict)
+    attributes: dict[str, Any] = field(default_factory=dict)
 
     def add_region(self, region: Region) -> None:
         """Append a Region to this transcript's region list.
@@ -141,11 +148,15 @@ class Gene:
         gene_id: Unique identifier for this gene.
         transcripts: Mapping from transcript ID to Transcript object.
         attributes: Key-value pairs from the GTF attributes field.
+            Values may be strings, integers, booleans, or ``None``.
+        segments: Non-overlapping genomic segments constructed by the
+            segment-construction pipeline.
     """
 
     gene_id: str
     transcripts: dict[str, Transcript] = field(default_factory=dict)
-    attributes: dict[str, str] = field(default_factory=dict)
+    attributes: dict[str, Any] = field(default_factory=dict)
+    segments: list[Region] = field(default_factory=list)
 
     def add_transcript(self, transcript: Transcript) -> None:
         """Add a Transcript to this gene, keyed by transcript ID.
