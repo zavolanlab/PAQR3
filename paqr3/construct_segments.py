@@ -6,8 +6,7 @@ from paqr3.models import Region, Gene, Transcript
 from gtfparse import read_gtf  # type: ignore
 
 
-def log_message(message):
-    logging.info(message)
+logger = logging.getLogger(__name__)
 
 
 class ConstructSegments:
@@ -523,14 +522,14 @@ class ConstructSegments:
         within the cluster with the highest RPM (midpoint if interval >1bp).
         Stores resulting PAS info in self.pas_df (columns: pas_id, chrom, start, end, strand, atlas_rpm, rep_cs).
         """
-        log_message("Reading PAS atlas...")
+        logger.info("Reading PAS atlas...")
         pas_bed = BedTool(self.pas_atlas_file)
 
         pas_sorted = sorted(
             pas_bed, key=lambda p: (p.chrom, p.strand, int(p.start))
         )
 
-        log_message(f"Merging PAS sites within {merge_distance} bp...")
+        logger.info("Merging PAS sites within %d bp...", merge_distance)
         merged_sites = []
         current_chrom = None
         current_strand = None
@@ -660,9 +659,10 @@ class ConstructSegments:
         Identifies merged PAS sites overlapping segments and constructs subsegments.
         Subsegments are the gaps preceding each PAS (plus the final tail).
         The subsegment before PAS_i gets pas_id_i; the final tail gets '.'.
-        On '-' strand, order is reversed so the first subsegment corresponds to the highest-coordinate PAS.
+        On '-' strand, order is reversed so the first subsegment corresponds
+        to the highest-coordinate PAS.
         """
-        log_message(
+        logger.info(
             "Identifying PAS overlaps with segments and constructing subsegments..."
         )
 
@@ -885,8 +885,12 @@ class ConstructSegments:
             out_subsegments_bed, sep="\t", index=False, header=False
         )
 
-        log_message(
-            f"Written PAS to {out_pas_bed}, genes to {out_genes_bed}, segments to {out_segments_bed}, and subsegments to {out_subsegments_bed}"
+        logger.info(
+            "Written PAS to %s, genes to %s, segments to %s, and subsegments to %s",
+            out_pas_bed,
+            out_genes_bed,
+            out_segments_bed,
+            out_subsegments_bed,
         )
         self.gene_mapping = gene_mapping
 
@@ -932,35 +936,35 @@ class ConstructSegments:
         out_pas_bed,
         merge_distance=5,
     ):
-        log_message("Reading annotation GTF...")
+        logger.info("Reading annotation GTF...")
         gtf_data = read_gtf(self.annotation_file, result_type="pandas")
 
-        log_message("Parsing GTF to Gene/Transcript/Region objects...")
+        logger.info("Parsing GTF to Gene/Transcript/Region objects...")
         self.genes = self.parse_gtf_to_genes(gtf_data)
 
-        log_message("Extending gene coordinates...")
+        logger.info("Extending gene coordinates...")
         self.extend_gene_coordinates()
 
-        log_message("Extending terminal exons...")
+        logger.info("Extending terminal exons...")
         self.extend_exon_downstream()
 
-        log_message("Defining exons and introns...")
+        logger.info("Defining exons and introns...")
         self.define_exons_introns()
 
-        log_message("Constructing segments...")
+        logger.info("Constructing segments...")
         self.construct_segments()
 
-        log_message(
+        logger.info(
             "Processing PAS atlas and building merged PAS interval tree..."
         )
         pas_trees = self.process_pas_atlas(merge_distance)
 
-        log_message(
+        logger.info(
             "Identifying PAS in segments and constructing subsegments..."
         )
         self.identify_pas_in_segments(pas_trees)
 
-        log_message(
+        logger.info(
             "Writing genes, segments, subsegments, and merged PAS to BED/TSV..."
         )
         self.write_segments_pas_to_bed(

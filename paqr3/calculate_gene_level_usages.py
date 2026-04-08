@@ -1,9 +1,4 @@
 import pandas as pd  # type: ignore
-import logging
-
-
-def log_message(msg):
-    logging.info(msg)
 
 
 class CalculateGeneLevelUsage:

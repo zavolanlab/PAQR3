@@ -1,7 +1,9 @@
 import argparse
+import logging
 from paqr3.version import __version__
 from paqr3.paqr3 import PAQR3
-from paqr3.construct_segments import log_message
+
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -100,7 +102,7 @@ def main():
 
     args = parser.parse_args()
 
-    log_message("Starting PAQR3 pipeline...")
+    logger.info("Starting PAQR3 pipeline...")
 
     paqr3_instance = PAQR3(
         args.annotation,

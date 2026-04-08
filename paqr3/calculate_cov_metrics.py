@@ -15,8 +15,7 @@ from pybedtools import BedTool  # type: ignore
 warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
 
 
-def log_message(message):
-    logging.info(message)
+logger = logging.getLogger(__name__)
 
 
 def json_serial(obj):
@@ -55,7 +54,7 @@ def evaluate_all_pas_usage_patterns(
     if all(mu == 0 for mu in computed_means):
         if debug:
             msg = f"[{segment_id}] All subsegment coverages are 0 → Assign usage = 0 to all PAS"
-            logging.info("DEBUG: " + msg)
+            logger.debug("DEBUG: %s", msg)
         zero_drops = [0.0] * len(unique_pas_ids)
         return {
             "pas_usage": {pid: 0.0 for pid in unique_pas_ids},
@@ -86,8 +85,12 @@ def evaluate_all_pas_usage_patterns(
             sum_drop = 0.0
             mono = 0
         if debug:
-            logging.info(
-                f"DEBUG: [{segment_id}] Single PAS '{pid}', mean_cov={mu:.3f} → usage={usage}"
+            logger.debug(
+                "DEBUG: [%s] Single PAS '%s', mean_cov=%.3f → usage=%.3f",
+                segment_id,
+                pid,
+                mu,
+                usage,
             )
         return {
             "pas_usage": {pid: usage},
@@ -108,14 +111,14 @@ def evaluate_all_pas_usage_patterns(
                 f"[{segment_id}] Too many PAS ({len(unique_pas_ids)}) in this segment; "
                 f"only segments with {max_pas_count} or fewer PAS are evaluated. Skipping."
             )
-            logging.info("DEBUG: " + msg)
+            logger.debug("DEBUG: %s", msg)
         return None
 
     # 4) No PAS at all? skip
     if not unique_pas_ids:
         if debug:
             msg = f"[{segment_id}] No PAS found in this segment, skipping."
-            logging.info("DEBUG: " + msg)
+            logger.debug("DEBUG: %s", msg)
         return None
 
     # 5) Evaluate every monotonic combo, collect those above threshold
@@ -194,8 +197,11 @@ def evaluate_all_pas_usage_patterns(
             p_val = 1 - f.cdf(f_stat, df_b, df_w)
 
         if debug:
-            logging.info(
-                f"DEBUG: Segment {segment_id} pattern {pattern}: f_stat={f_stat:.3f}"
+            logger.debug(
+                "DEBUG: Segment %s pattern %s: f_stat=%.3f",
+                segment_id,
+                pattern,
+                f_stat,
             )
 
         if f_stat >= f_stat_threshold:
@@ -205,7 +211,7 @@ def evaluate_all_pas_usage_patterns(
     if not combos_info:
         if debug:
             msg = f"[{segment_id}] No PAS combinations met the F-stat threshold; skipping segment."
-            logging.info("DEBUG: " + msg)
+            logger.debug("DEBUG: %s", msg)
         return None
 
     # 7) Build the union pattern and compute final drops & usage
@@ -232,8 +238,8 @@ def evaluate_all_pas_usage_patterns(
         for g in groups
     ]
     if debug:
-        logging.info(
-            f"DEBUG: Segment {segment_id} union group means: {group_means}"
+        logger.debug(
+            "DEBUG: Segment %s union group means: %s", segment_id, group_means
         )
 
     if len(group_means) >= 2:
@@ -262,19 +268,18 @@ def evaluate_all_pas_usage_patterns(
         (d / sum_union_drops if sum_union_drops > 0 else 0.0)
         for d in drop_per_pas
     ]
-    best_pattern, best_f, best_p = max(combos_info, key=lambda x: x[1])
+    _, best_f, best_p = max(combos_info, key=lambda x: x[1])
 
-    if debug:
-        logging.info(
-            f"DEBUG: Segment {segment_id} union_pattern: {union_pattern}"
-        )
-        logging.info(f"DEBUG: Segment {segment_id} union_drops: {union_drops}")
-        logging.info(
-            f"DEBUG: Segment {segment_id} union_monotonic: {union_mono}"
-        )
-        logging.info(
-            f"DEBUG: Segment {segment_id} usage_per_pas: {usage_per_pas}"
-        )
+    logger.debug(
+        "DEBUG: Segment %s union_pattern: %s", segment_id, union_pattern
+    )
+    logger.debug("DEBUG: Segment %s union_drops: %s", segment_id, union_drops)
+    logger.debug(
+        "DEBUG: Segment %s union_monotonic: %s", segment_id, union_mono
+    )
+    logger.debug(
+        "DEBUG: Segment %s usage_per_pas: %s", segment_id, usage_per_pas
+    )
 
     return {
         "pas_usage": {
@@ -459,7 +464,7 @@ class CalculateCoverages:
                     )
         else:
             for segment_id, group in grouped:
-                logging.info(f"DEBUG: Evaluating segment {segment_id}")
+                logger.debug("DEBUG: Evaluating segment %s", segment_id)
                 subsegments = group.to_dict("records")
                 result = evaluate_all_pas_usage_patterns(
                     subsegments,
@@ -531,7 +536,7 @@ class CalculateCoverages:
         if "coverage" in results_df.columns:
             results_df = results_df.drop(columns=["coverage"])
         results_df.to_csv(output_tsv, sep="\t", index=False)
-        log_message(f"Results written to {output_tsv}")
+        logger.info("Results written to %s", output_tsv)
 
     def calculate_segment_expression_stats(self, usage_df, subsegments_df):
         """
@@ -645,7 +650,7 @@ class CalculateCoverages:
         start_time = time.time()
 
         # Step 1: initial coverage metrics
-        log_message("Step 1: Calculating initial coverage metrics...")
+        logger.info("Step 1: Calculating initial coverage metrics...")
         raw_cov_df = self.calculate_coverage_metrics(subsegments_df)
 
         grouped = raw_cov_df.groupby(
@@ -683,7 +688,7 @@ class CalculateCoverages:
         self.write_coverage_results(cov_df.copy(), output_raw_tsv)
 
         # Step 2: PAS usage via F-statistics
-        log_message("Step 2: Evaluating PAS usage models via F-statistics...")
+        logger.info("Step 2: Evaluating PAS usage models via F-statistics...")
         # prefer the passed-in threshold, else use the one from __init__
         thr = (
             f_stat_threshold
@@ -711,7 +716,7 @@ class CalculateCoverages:
         self.write_coverage_results(refined_usage_df, output_final_tsv)
 
         end_time = time.time()
-        log_message("PAS usage evaluation complete.")
-        log_message(f"Total runtime: {end_time - start_time:.2f} seconds")
+        logger.info("PAS usage evaluation complete.")
+        logger.info("Total runtime: %.2f seconds", end_time - start_time)
 
         return refined_usage_df

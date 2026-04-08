@@ -1,9 +1,4 @@
-import logging
 import pandas as pd  # type: ignore
-
-
-def log_message(msg):
-    logging.info(msg)
 
 
 class CalculatePosteriorUsage:

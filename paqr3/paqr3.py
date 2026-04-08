@@ -1,7 +1,7 @@
 import logging
 import os
 
-from paqr3.construct_segments import ConstructSegments, log_message
+from paqr3.construct_segments import ConstructSegments
 from paqr3.calculate_cov_metrics import CalculateCoverages
 from paqr3.calculate_posterior_usage import CalculatePosteriorUsage
 from paqr3.calculate_gene_level_usages import CalculateGeneLevelUsage
@@ -21,6 +21,8 @@ formatter = logging.Formatter(
 handler.setFormatter(formatter)
 logging.getLogger().addHandler(handler)
 logging.getLogger().setLevel(logging.INFO)
+
+logger = logging.getLogger(__name__)
 
 
 class PAQR3:
@@ -118,7 +120,7 @@ class PAQR3:
             results_dir, f"{sample_name}_posterior_usage.tsv"
         )
         posterior_df.to_csv(posterior_tsv, sep="\t", index=False)
-        log_message(f"Posterior usage written to {posterior_tsv}")
+        logger.info("Posterior usage written to %s", posterior_tsv)
 
         # 8) Compute gene-level PAS usage summary
         gene_usage_calc = CalculateGeneLevelUsage(posterior_df)
@@ -128,6 +130,6 @@ class PAQR3:
             results_dir, f"{sample_name}_gene_level_usage.tsv"
         )
         gene_usage_df.to_csv(gene_usage_tsv, sep="\t", index=False)
-        log_message(f"Gene-level usage written to {gene_usage_tsv}")
+        logger.info("Gene-level usage written to %s", gene_usage_tsv)
 
-        log_message("PAQR3 pipeline completed.")
+        logger.info("PAQR3 pipeline completed.")
