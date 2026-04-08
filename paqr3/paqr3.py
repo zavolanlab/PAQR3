@@ -6,22 +6,6 @@ from paqr3.calculate_cov_metrics import CalculateCoverages
 from paqr3.calculate_posterior_usage import CalculatePosteriorUsage
 from paqr3.calculate_gene_level_usages import CalculateGeneLevelUsage
 
-# ——————————— Logging setup ———————————
-logging.basicConfig(
-    format="[{asctime}] {message}",
-    style="{",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    level=logging.INFO,
-)
-logging.getLogger().handlers.clear()
-handler = logging.StreamHandler()
-formatter = logging.Formatter(
-    "[{asctime}] {message}", style="{", datefmt="%Y-%m-%d %H:%M:%S"
-)
-handler.setFormatter(formatter)
-logging.getLogger().addHandler(handler)
-logging.getLogger().setLevel(logging.INFO)
-
 logger = logging.getLogger(__name__)
 
 

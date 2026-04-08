@@ -2,9 +2,8 @@ import logging
 import pandas as pd  # type: ignore
 from pybedtools import BedTool  # type: ignore
 from intervaltree import Interval, IntervalTree  # type: ignore
-from paqr3.models import Region, Gene, Transcript
 from gtfparse import read_gtf  # type: ignore
-
+from paqr3.models import Region, Gene, Transcript
 
 logger = logging.getLogger(__name__)
 

@@ -3,6 +3,22 @@ import logging
 from paqr3.version import __version__
 from paqr3.paqr3 import PAQR3
 
+# ——————————— Logging setup ———————————
+logging.basicConfig(
+    format="[{asctime}] {message}",
+    style="{",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO,
+)
+logging.getLogger().handlers.clear()
+handler = logging.StreamHandler()
+formatter = logging.Formatter(
+    "[{asctime}] {message}", style="{", datefmt="%Y-%m-%d %H:%M:%S"
+)
+handler.setFormatter(formatter)
+logging.getLogger().addHandler(handler)
+logging.getLogger().setLevel(logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 
