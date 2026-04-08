@@ -1,5 +1,7 @@
 import argparse
+import sys
 import logging
+from pathlib import Path
 from paqr3.version import __version__
 from paqr3.paqr3 import PAQR3
 
@@ -22,6 +24,12 @@ logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _require_file(path: str, flag: str) -> None:
+    if not Path(path).is_file():
+        print(f"Error: {flag} file not found: {path}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=("Construct genomic segments from RNA-Seq annotations.")
@@ -34,7 +42,7 @@ def main():
         help="Path to the annotation GTF file.",
     )
     parser.add_argument(
-        "--downstream_exon_extension",
+        "--downstream-exon-extension",
         "-de",
         type=int,
         default=200,
@@ -66,7 +74,7 @@ def main():
         ),
     )
     parser.add_argument(
-        "--output_dir",
+        "--output-dir",
         "-o",
         type=str,
         required=True,
@@ -118,21 +126,26 @@ def main():
 
     args = parser.parse_args()
 
+    _require_file(args.annotation, "--annotation")
+    _require_file(args.pas_atlas, "--pas-atlas")
+    _require_file(args.coverage[0], "--coverage")
+    _require_file(args.coverage[1], "--coverage")
+
     logger.info("Starting PAQR3 pipeline...")
 
     paqr3_instance = PAQR3(
-        args.annotation,
-        args.pas_atlas,
-        args.coverage[0],
-        args.coverage[1],
-        args.output_dir,
-        args.downstream_exon_extension,
-        args.merge_distance,
-        args.max_pas_count,
-        args.bam,
-        args.f_stat_threshold,
-        args.posterior_usage_weight,
-        args.debug,
+        annotation_file=args.annotation,
+        pas_atlas_file=args.pas_atlas,
+        coverage_bw_pos=args.coverage[0],
+        coverage_bw_neg=args.coverage[1],
+        output_dir=args.output_dir,
+        downstream_exon_extension=args.downstream_exon_extension,
+        merge_distance=args.merge_distance,
+        max_pas_count=args.max_pas_count,
+        bam_file=args.bam,
+        f_stat_threshold=args.f_stat_threshold,
+        posterior_usage_weight=args.posterior_usage_weight,
+        debug=args.debug,
     )
     paqr3_instance.run()
 
