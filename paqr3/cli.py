@@ -109,6 +109,16 @@ def main():
         help="Weight to combine RNA-seq and atlas RPMs for posterior PAS usage (default: 0.1)",
     )
     parser.add_argument(
+        "--threads",
+        "-t",
+        type=int,
+        default=1,
+        help=(
+            "Number of parallel threads for BigWig reading and worker"
+            " processes for F-statistic evaluation (default: 1)."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug output (default: off)",
@@ -131,7 +141,7 @@ def main():
     _require_file(args.coverage[0], "--coverage")
     _require_file(args.coverage[1], "--coverage")
 
-    logger.info("Starting PAQR3 pipeline...")
+    logger.info("Starting PAQR3 pipeline... - new version")
 
     paqr3_instance = PAQR3(
         annotation_file=args.annotation,
@@ -145,6 +155,7 @@ def main():
         bam_file=args.bam,
         f_stat_threshold=args.f_stat_threshold,
         posterior_usage_weight=args.posterior_usage_weight,
+        n_threads=args.threads,
         debug=args.debug,
     )
     paqr3_instance.run()

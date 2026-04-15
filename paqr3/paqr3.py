@@ -23,6 +23,7 @@ class PAQR3:
         bam_file=None,
         f_stat_threshold=100,
         posterior_usage_weight=0.1,
+        n_threads=1,
         debug=False,
     ):
         self.annotation_file = annotation_file
@@ -36,6 +37,7 @@ class PAQR3:
         self.bam_file = bam_file
         self.f_stat_threshold = f_stat_threshold
         self.posterior_usage_weight = posterior_usage_weight
+        self.n_threads = n_threads
         self.debug = debug
 
     def run(self):
@@ -82,9 +84,10 @@ class PAQR3:
         )
         refined_usage_df = cc.run(
             subsegments_df,
-            output_raw_tsv=coverage_tsv,
+            output_raw_tsv=coverage_tsv if self.debug else None,
             output_final_tsv=usage_tsv,
             output_debug_json=debug_json if self.debug else None,
+            n_threads=self.n_threads,
             max_pas_count=self.max_pas_count,
             f_stat_threshold=self.f_stat_threshold,
             debug=self.debug,

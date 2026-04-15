@@ -156,8 +156,7 @@ def evaluate_all_pas_usage_patterns(
             usage, drop, sum_drop, mono = 0.0, 0.0, 0.0, 0
         if debug:
             logger.debug(
-                "DEBUG: [%s] Single PAS '%s', mean_cov=%.3f "
-                "→ usage=%.3f",
+                "DEBUG: [%s] Single PAS '%s', mean_cov=%.3f " "→ usage=%.3f",
                 segment_id,
                 pid,
                 mu,
@@ -256,9 +255,7 @@ def evaluate_all_pas_usage_patterns(
         if k == len(slices):
             if not groups:
                 return  # all-zeros pattern — skip
-            last_group = [
-                i for s in slices[g_start:] for i in s
-            ] + tail
+            last_group = [i for s in slices[g_start:] for i in s] + tail
             if last_group:
                 if _group_mean(last_group) > prev_mean:
                     return  # tail violates monotonicity
@@ -389,9 +386,7 @@ def evaluate_all_pas_usage_patterns(
     logger.debug(
         "DEBUG: Segment %s union_pattern: %s", segment_id, union_pattern
     )
-    logger.debug(
-        "DEBUG: Segment %s union_drops: %s", segment_id, union_drops
-    )
+    logger.debug("DEBUG: Segment %s union_drops: %s", segment_id, union_drops)
     logger.debug(
         "DEBUG: Segment %s union_monotonic: %s", segment_id, union_mono
     )
@@ -503,6 +498,71 @@ def process_segment(
     return segment_id, subsegments, result
 
 
+def _read_coverage_batch(batch, bw_pos_path, bw_neg_path):
+    """Read BigWig coverage for a batch of sub-segment rows.
+
+    Opens strand-specific BigWig handles once per call and closes them
+    on completion, making this safe to call from a
+    :class:`~concurrent.futures.ThreadPoolExecutor` worker where each
+    thread owns its own handles.  BigWig reads release the GIL, so
+    threads provide genuine parallelism here.
+
+    Args:
+        batch: Iterable of namedtuples (as returned by
+            :meth:`~pandas.DataFrame.itertuples`) with fields
+            ``gene_unique_id``, ``segment_number``,
+            ``subsegment_number``, ``chrom``, ``start``, ``end``,
+            ``strand``, ``pas_id``.
+        bw_pos_path: Path to the positive-strand BigWig file.
+        bw_neg_path: Path to the negative-strand BigWig file.
+
+    Returns:
+        List of coverage record dicts with keys ``gene_id``,
+        ``segment_id``, ``subsegment_id``, ``pas_id``, ``mean_cov``,
+        ``sum_squared_values``, ``coverage``.
+    """
+    bw_pos = pyBigWig.open(bw_pos_path)
+    bw_neg = pyBigWig.open(bw_neg_path)
+    rows_out = []
+    for row in batch:
+        gene_id = row.gene_unique_id
+        seg_num = row.segment_number
+        subseg_num = row.subsegment_number
+        chrom = row.chrom
+        start = row.start
+        end = row.end
+        strand = row.strand
+        pas_id = row.pas_id
+        segment_id = f"{gene_id}.{seg_num}"
+        subsegment_id = f"{gene_id}.{seg_num}.{subseg_num}"
+
+        bw = bw_pos if strand == "+" else bw_neg
+        try:
+            coverage = bw.values(chrom, start, end, numpy=True)
+            coverage = np.nan_to_num(coverage, nan=0.0)
+        except RuntimeError:
+            coverage = np.array([])
+
+        mean_cov = np.nanmean(coverage) if len(coverage) > 0 else 0.0
+        sum_squared = (
+            np.nansum(coverage**2) if len(coverage) > 0 else 0.0
+        )
+        rows_out.append(
+            {
+                "gene_id": gene_id,
+                "segment_id": segment_id,
+                "subsegment_id": subsegment_id,
+                "pas_id": pas_id,
+                "mean_cov": mean_cov,
+                "sum_squared_values": sum_squared,
+                "coverage": coverage,
+            }
+        )
+    bw_pos.close()
+    bw_neg.close()
+    return rows_out
+
+
 class CalculateCoverages:
     """Compute RNA-seq coverage metrics and PAS usage fractions.
 
@@ -543,21 +603,29 @@ class CalculateCoverages:
         self.bam_file = bam_file
         self.f_stat_threshold = f_stat_threshold
 
-    def calculate_coverage_metrics(self, subsegments_df):
+    def calculate_coverage_metrics(self, subsegments_df, n_threads=1):
         """Read BigWig coverage for every sub-segment.
 
-        Opens the strand-specific BigWig files once, then reads
-        coverage values for each sub-segment row using
-        :meth:`pyBigWig.pyBigWig.values`.  Rows are iterated with
-        :meth:`~pandas.DataFrame.itertuples` (3–5× faster than
-        :meth:`~pandas.DataFrame.iterrows`, which boxes each row into
-        a :class:`~pandas.Series` object).
+        Delegates to :func:`_read_coverage_batch`.  When
+        ``n_threads > 1`` the sub-segment list is split into equal
+        chunks and each chunk is processed by a separate thread using a
+        :class:`~concurrent.futures.ThreadPoolExecutor`.  BigWig reads
+        release the GIL, so threads provide genuine I/O parallelism.
+        Each worker opens and closes its own BigWig handles, so handles
+        are never shared across threads.
+
+        When ``n_threads == 1`` a single call to
+        :func:`_read_coverage_batch` processes all rows sequentially
+        with one pair of open handles — identical to the original
+        single-threaded behaviour.
 
         Args:
             subsegments_df: DataFrame with columns
                 ``gene_unique_id``, ``segment_number``,
                 ``subsegment_number``, ``chrom``, ``start``, ``end``,
                 ``strand``, ``pas_id``.
+            n_threads: Number of threads for parallel BigWig reading.
+                Defaults to 1 (sequential).
 
         Returns:
             A new DataFrame with one row per sub-segment and columns
@@ -565,54 +633,42 @@ class CalculateCoverages:
             ``pas_id``, ``mean_cov``, ``sum_squared_values``,
             ``coverage``.
         """
-        bw_pos = pyBigWig.open(self.coverage_bw_pos)
-        bw_neg = pyBigWig.open(self.coverage_bw_neg)
+        rows = list(subsegments_df.itertuples(index=False))
 
-        all_rows = []
-        for row in subsegments_df.itertuples(index=False):
-            gene_id = row.gene_unique_id
-            seg_num = row.segment_number
-            subseg_num = row.subsegment_number
-            chrom = row.chrom
-            start = row.start
-            end = row.end
-            strand = row.strand
-            pas_id = row.pas_id
-            segment_id = f"{gene_id}.{seg_num}"
-            subsegment_id = f"{gene_id}.{seg_num}.{subseg_num}"
-
-            bw = bw_pos if strand == "+" else bw_neg
-
-            try:
-                coverage = bw.values(chrom, start, end, numpy=True)
-                coverage = np.nan_to_num(coverage, nan=0.0)
-            except RuntimeError:
-                coverage = np.array([])
-
-            mean_cov = np.nanmean(coverage) if len(coverage) > 0 else 0.0
-            sum_squared = np.nansum(coverage**2) if len(coverage) > 0 else 0.0
-
-            all_rows.append(
-                {
-                    "gene_id": gene_id,
-                    "segment_id": segment_id,
-                    "subsegment_id": subsegment_id,
-                    "pas_id": pas_id,
-                    "mean_cov": mean_cov,
-                    "sum_squared_values": sum_squared,
-                    "coverage": coverage,
-                }
+        if n_threads <= 1:
+            return pd.DataFrame(
+                _read_coverage_batch(
+                    rows, self.coverage_bw_pos, self.coverage_bw_neg
+                )
             )
 
-        bw_pos.close()
-        bw_neg.close()
+        # Split rows into n_threads chunks; submit each to a thread.
+        chunk_size = max(1, (len(rows) + n_threads - 1) // n_threads)
+        chunks = [
+            rows[i : i + chunk_size] for i in range(0, len(rows), chunk_size)
+        ]
+        all_rows = []
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=n_threads
+        ) as executor:
+            futures = [
+                executor.submit(
+                    _read_coverage_batch,
+                    chunk,
+                    self.coverage_bw_pos,
+                    self.coverage_bw_neg,
+                )
+                for chunk in chunks
+            ]
+            for fut in futures:  # iterate in submission order → stable output
+                all_rows.extend(fut.result())
         return pd.DataFrame(all_rows)
 
     def evaluate_pas_usage_models(
         self,
         raw_cov_df,
         output_tsv_debug=None,
-        n_procs=8,
+        n_procs=16,
         max_pas_count=10,
         f_stat_threshold=100,
         debug=False,
@@ -665,9 +721,7 @@ class CalculateCoverages:
         # per-process pickle overhead (DataFrame → list[dict]).
         grouped = [
             (seg_id, grp.to_dict("records"))
-            for seg_id, grp in raw_cov_df.groupby(
-                "segment_id", sort=False
-            )
+            for seg_id, grp in raw_cov_df.groupby("segment_id", sort=False)
         ]
 
         if n_procs > 1:
@@ -694,23 +748,19 @@ class CalculateCoverages:
                                     {
                                         "gene_id": s["gene_id"],
                                         "segment_id": s["segment_id"],
-                                        "subsegment_id": s[
-                                            "subsegment_id"
-                                        ],
+                                        "subsegment_id": s["subsegment_id"],
                                         "pas_id": pid,
                                         "mean_cov": s["mean_cov"],
                                         "sum_squared_values": s[
                                             "sum_squared_values"
                                         ],
-                                        "rna_drop_cov": result[
-                                            "rna_drop_cov"
-                                        ][drop_idx],
+                                        "rna_drop_cov": result["rna_drop_cov"][
+                                            drop_idx
+                                        ],
                                         "rna_sum_drop_cov": result[
                                             "rna_sum_drop_cov"
                                         ],
-                                        "rna_monotone": result[
-                                            "rna_monotone"
-                                        ],
+                                        "rna_monotone": result["rna_monotone"],
                                         "rna_usage": usage,
                                         "f_stat": result["f_stat"],
                                         "p_value": result["p_value"],
@@ -726,9 +776,7 @@ class CalculateCoverages:
                     )
         else:
             for segment_id, subsegments in grouped:
-                logger.debug(
-                    "DEBUG: Evaluating segment %s", segment_id
-                )
+                logger.debug("DEBUG: Evaluating segment %s", segment_id)
                 result = evaluate_all_pas_usage_patterns(
                     subsegments,
                     segment_id,
@@ -753,9 +801,9 @@ class CalculateCoverages:
                                     "sum_squared_values": s[
                                         "sum_squared_values"
                                     ],
-                                    "rna_drop_cov": result[
-                                        "rna_drop_cov"
-                                    ][drop_idx],
+                                    "rna_drop_cov": result["rna_drop_cov"][
+                                        drop_idx
+                                    ],
                                     "rna_sum_drop_cov": result[
                                         "rna_sum_drop_cov"
                                     ],
@@ -849,16 +897,25 @@ class CalculateCoverages:
             + seg_meta["segment_number"].astype(str)
         )
 
-        # 2) Count reads per segment via pysam (streaming, low memory)
+        # 2) Count reads per segment via pysam.
+        # Sort by (chrom, start) so bam.count() accesses the BAM index
+        # in roughly sequential order, avoiding random seeks across the
+        # file.  The original row order is restored after counting via
+        # the reset index saved before sorting.
         if not self.bam_file:
             raise ValueError("BAM file is required to compute RPM.")
+        seg_meta = (
+            seg_meta.reset_index(drop=True)
+            .sort_values(["chrom", "start"])
+            .reset_index(drop=True)
+        )
         bam = pysam.AlignmentFile(self.bam_file, "rb")
         read_counts = []
-        for _, row in seg_meta.iterrows():
+        for row in seg_meta.itertuples(index=False):
             count = bam.count(
-                contig=row["chrom"],
-                start=int(row["start"]),
-                end=int(row["end"]),
+                contig=row.chrom,
+                start=int(row.start),
+                end=int(row.end),
             )
             read_counts.append(count)
         bam.close()
@@ -885,9 +942,7 @@ class CalculateCoverages:
 
         # 4) Dense ranking (highest value → rank 1)
         seg_meta["rpm_rank"] = (
-            seg_meta["rpm"]
-            .rank(method="dense", ascending=False)
-            .astype(int)
+            seg_meta["rpm"].rank(method="dense", ascending=False).astype(int)
         )
         seg_meta["median_rank"] = (
             seg_meta["median_cov"]
@@ -937,7 +992,7 @@ class CalculateCoverages:
         output_raw_tsv,
         output_final_tsv,
         output_debug_json=None,
-        n_procs=8,
+        n_threads=1,
         max_pas_count=10,
         f_stat_threshold=None,
         debug=False,
@@ -946,10 +1001,12 @@ class CalculateCoverages:
 
         Steps, in order:
 
-        1. Compute per-sub-segment coverage metrics from BigWig files.
-        2. Apply simple drop-based PAS usage and write the raw TSV.
+        1. Compute per-sub-segment coverage metrics from BigWig files
+           (parallelised across threads when ``n_threads > 1``).
+        2. *Optional*: apply simple drop-based PAS usage and write the
+           raw TSV (skipped when ``output_raw_tsv`` is ``None``).
         3. Evaluate PAS usage models via F-statistics (parallelised
-           across segments when ``n_procs > 1``).
+           across worker processes when ``n_threads > 1``).
         4. Optionally compute per-segment expression ranks from BAM.
         5. Write the final per-PAS usage TSV.
 
@@ -957,12 +1014,13 @@ class CalculateCoverages:
             subsegments_df: Sub-segment coordinate table from
                 :meth:`~paqr3.construct_segments.ConstructSegments\
 .create_subsegments_dataframe`.
-            output_raw_tsv: Path for the intermediate coverage TSV.
+            output_raw_tsv: Path for the intermediate coverage TSV, or
+                ``None`` to skip the raw-TSV step entirely.
             output_final_tsv: Path for the final per-PAS usage TSV.
             output_debug_json: Optional path for a JSON debug dump of
                 all evaluated patterns.
-            n_procs: Number of worker processes for parallel
-                F-statistic evaluation.
+            n_threads: Number of threads for BigWig reading *and*
+                worker processes for F-statistic evaluation.
             max_pas_count: Passed to
                 :func:`evaluate_all_pas_usage_patterns`; segments with
                 more PAS are skipped.
@@ -977,46 +1035,47 @@ class CalculateCoverages:
 
         # Step 1: initial coverage metrics
         logger.info("Step 1: Calculating initial coverage metrics...")
-        raw_cov_df = self.calculate_coverage_metrics(subsegments_df)
-
-        grouped = raw_cov_df.groupby(
-            ["gene_id", "segment_id"], group_keys=False
+        raw_cov_df = self.calculate_coverage_metrics(
+            subsegments_df, n_threads=n_threads
         )
 
-        results = [
-            compute_drops_and_usage(group)
-            for _, group in grouped
-            if not group["mean_cov"].isna().all()
-        ]
-
-        # Filter out empty or all-NA DataFrames before concatenation
-        cov_df = (
-            pd.concat(
-                [
-                    r
-                    for r in results
-                    if not r.empty and not r.isna().all().all()
-                ],
-                ignore_index=True,
+        # Step 2 (optional): simple drop-based usage → raw TSV.
+        # Skipped when output_raw_tsv is None to avoid a redundant pass
+        # over the data — the F-stat evaluation below is the authoritative
+        # source of PAS usage.
+        if output_raw_tsv:
+            grouped = raw_cov_df.groupby(
+                ["gene_id", "segment_id"], group_keys=False
             )
-            if results
-            else pd.DataFrame(
-                columns=raw_cov_df.columns.tolist()
-                + [
-                    "rna_drop_cov",
-                    "rna_sum_drop_cov",
-                    "rna_monotone",
-                    "rna_usage",
-                ]
+            results = [
+                compute_drops_and_usage(group)
+                for _, group in grouped
+                if not group["mean_cov"].isna().all()
+            ]
+            cov_df = (
+                pd.concat(
+                    [
+                        r
+                        for r in results
+                        if not r.empty and not r.isna().all().all()
+                    ],
+                    ignore_index=True,
+                )
+                if results
+                else pd.DataFrame(
+                    columns=raw_cov_df.columns.tolist()
+                    + [
+                        "rna_drop_cov",
+                        "rna_sum_drop_cov",
+                        "rna_monotone",
+                        "rna_usage",
+                    ]
+                )
             )
-        )
+            self.write_coverage_results(cov_df.copy(), output_raw_tsv)
 
-        self.write_coverage_results(cov_df.copy(), output_raw_tsv)
-
-        # Step 2: PAS usage via F-statistics
-        logger.info(
-            "Step 2: Evaluating PAS usage models via F-statistics..."
-        )
+        # Step 3: PAS usage via F-statistics
+        logger.info("Step 3: Evaluating PAS usage models via F-statistics...")
         # prefer the passed-in threshold, else use the one from __init__
         thr = (
             f_stat_threshold
@@ -1026,7 +1085,7 @@ class CalculateCoverages:
         refined_usage_df = self.evaluate_pas_usage_models(
             raw_cov_df,
             output_debug_json,
-            n_procs=n_procs,
+            n_procs=n_threads,
             max_pas_count=max_pas_count,
             f_stat_threshold=thr,
             debug=debug,
