@@ -510,9 +510,8 @@ def _read_coverage_batch(batch, bw_pos_path, bw_neg_path):
     Args:
         batch: Iterable of namedtuples (as returned by
             :meth:`~pandas.DataFrame.itertuples`) with fields
-            ``gene_unique_id``, ``segment_number``,
-            ``subsegment_number``, ``chrom``, ``start``, ``end``,
-            ``strand``, ``pas_id``.
+            ``gene_id``, ``segment_id``, ``subsegment_id``, ``chrom``,
+            ``start``, ``end``, ``strand``, ``pas_id``.
         bw_pos_path: Path to the positive-strand BigWig file.
         bw_neg_path: Path to the negative-strand BigWig file.
 
@@ -525,17 +524,10 @@ def _read_coverage_batch(batch, bw_pos_path, bw_neg_path):
     bw_neg = pyBigWig.open(bw_neg_path)
     rows_out = []
     for row in batch:
-        gene_id = row.gene_unique_id
-        seg_num = row.segment_number
-        subseg_num = row.subsegment_number
         chrom = row.chrom
         start = row.start
         end = row.end
         strand = row.strand
-        pas_id = row.pas_id
-        segment_id = f"{gene_id}.{seg_num}"
-        subsegment_id = f"{gene_id}.{seg_num}.{subseg_num}"
-
         bw = bw_pos if strand == "+" else bw_neg
         try:
             coverage = bw.values(chrom, start, end, numpy=True)
@@ -544,15 +536,13 @@ def _read_coverage_batch(batch, bw_pos_path, bw_neg_path):
             coverage = np.array([])
 
         mean_cov = np.nanmean(coverage) if len(coverage) > 0 else 0.0
-        sum_squared = (
-            np.nansum(coverage**2) if len(coverage) > 0 else 0.0
-        )
+        sum_squared = np.nansum(coverage**2) if len(coverage) > 0 else 0.0
         rows_out.append(
             {
-                "gene_id": gene_id,
-                "segment_id": segment_id,
-                "subsegment_id": subsegment_id,
-                "pas_id": pas_id,
+                "gene_id": row.gene_id,
+                "segment_id": row.segment_id,
+                "subsegment_id": row.subsegment_id,
+                "pas_id": row.pas_id,
                 "mean_cov": mean_cov,
                 "sum_squared_values": sum_squared,
                 "coverage": coverage,
@@ -620,10 +610,9 @@ class CalculateCoverages:
         single-threaded behaviour.
 
         Args:
-            subsegments_df: DataFrame with columns
-                ``gene_unique_id``, ``segment_number``,
-                ``subsegment_number``, ``chrom``, ``start``, ``end``,
-                ``strand``, ``pas_id``.
+            subsegments_df: DataFrame with columns ``gene_id``,
+                ``segment_id``, ``subsegment_id``, ``chrom``,
+                ``start``, ``end``, ``strand``, ``pas_id``.
             n_threads: Number of threads for parallel BigWig reading.
                 Defaults to 1 (sequential).
 
@@ -882,19 +871,13 @@ class CalculateCoverages:
         Raises:
             ValueError: If ``self.bam_file`` is not set.
         """
-        # 1) Build segment metadata
-        seg_meta = subsegments_df.groupby(
-            ["gene_unique_id", "segment_number"], as_index=False
-        ).agg(
+        # 1) Build segment metadata from the subsegments DataFrame.
+        # subsegments_df already carries segment_id and gene_id directly.
+        seg_meta = subsegments_df.groupby("segment_id", as_index=False).agg(
             chrom=("chrom", "first"),
             strand=("strand", "first"),
             start=("start", "min"),
             end=("end", "max"),
-        )
-        seg_meta["segment_id"] = (
-            seg_meta["gene_unique_id"].astype(str)
-            + "."
-            + seg_meta["segment_number"].astype(str)
         )
 
         # 2) Count reads per segment via pysam.

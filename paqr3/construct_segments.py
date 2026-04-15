@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 # 1-based BED notation). Configurable here if the atlas format changes.
 _PAS_RPM_COL: int = 4
 
+# Maps segment_origin values to single-letter type prefixes used in IDs.
+# "EX" → regular exon, "IN" → intron, "TE" → terminal exon.
+_ORIGIN_TO_PREFIX: dict[str, str] = {"EX": "E", "IN": "I", "TE": "T"}
+
 # Columns excluded when building GTF attribute dicts.
 _GENE_SKIP_COLS: frozenset[str] = frozenset(
     {"seqname", "source", "feature", "start", "end", "score", "strand"}
@@ -842,6 +846,206 @@ class ConstructSegments:
                 segment.attributes["overlapping_pas"] = overlapping_pas_ids
                 segment.subsegments = subsegments
 
+    def _assign_segment_ids(self) -> dict[tuple[str, int], str]:
+        """Map (gene_id, segment_number) to a human-readable segment ID.
+
+        Segment IDs take the form ``{gene_id}:{prefix}{index:03d}``
+        where *prefix* is ``E`` (exon), ``I`` (intron), or ``T``
+        (terminal exon), and *index* is a 1-based per-type counter
+        within the gene.  Segments are processed in
+        ``segment_number`` order so numbering is stable.
+
+        Returns:
+            Dict mapping ``(gene_id, segment_number)`` to a segment
+            ID string such as ``"ENSG00000186092.1:T001"``.
+        """
+        seg_id_map: dict[tuple[str, int], str] = {}
+        for gene in self.genes.values():
+            segs = sorted(
+                gene.segments,
+                key=lambda s: s.attributes["segment_number"],
+            )
+            counters: dict[str, int] = {}
+            for seg in segs:
+                origin = seg.attributes.get("segment_origin", "EX")
+                prefix = _ORIGIN_TO_PREFIX.get(origin, "E")
+                counters[prefix] = counters.get(prefix, 0) + 1
+                seg_num = seg.attributes["segment_number"]
+                seg_id_map[(gene.gene_id, seg_num)] = (
+                    f"{gene.gene_id}:{prefix}{counters[prefix]:03d}"
+                )
+        return seg_id_map
+
+    def create_segments_tsv(
+        self,
+        out_tsv: str,
+        out_debug_bed: str | None = None,
+    ) -> None:
+        """Write the segments TSV (and optionally a debug BED).
+
+        The TSV is the primary output of the segmentation stage and
+        the required input for ``paqr3 quant``.  It contains one row
+        per sub-segment belonging to a segment with at least one
+        overlapping PAS; segments with no PAS overlap are omitted.
+
+        TSV columns (tab-separated, with header):
+
+        - ``chrom``, ``start``, ``end``: 0-based half-open genomic
+          coordinates.
+        - ``subsegment_id``: ``{gene_id}:{TypeNNN}:{sub:03d}``
+          — *Type* is ``E`` / ``I`` / ``T``, *NNN* is the per-type
+          segment counter within the gene, *sub* is the 1-based
+          sub-segment index within the segment.
+        - ``strand``: ``"+"`` or ``"-"``.
+        - ``overlapping_pas_id``: representative cleavage-site
+          coordinate of the PAS that terminates this sub-segment
+          (e.g. ``chr1:65435``), or ``"."`` for the trailing
+          sub-segment.
+        - ``atlas_rpm``: mean RPM of the merged PAS cluster; ``0.0``
+          for trailing sub-segments.
+
+        If *out_debug_bed* is given, a headerless six-column BED file
+        is written listing every gene, segment, sub-segment and PAS
+        with their genomic coordinates and a ``type`` label
+        (``gene`` / ``segment`` / ``subsegment`` / ``pas``).  PAS
+        entries appear at most once per unique representative CS.
+
+        Args:
+            out_tsv: Output path for the segments TSV file.
+            out_debug_bed: Optional path for the debug BED file.
+        """
+        assert self.pas_df is not None, (
+            "process_pas_atlas() must be called before "
+            "create_segments_tsv()"
+        )
+
+        # Build lookups: integer pas_id → rep_cs and → atlas_rpm.
+        id_to_rep: dict[int, str] = {}
+        id_to_rpm: dict[int, float] = {}
+        # Also: rep_cs → (chrom, start, end, strand) for debug BED.
+        rep_to_coords: dict[str, tuple[str, int, int, str]] = {}
+        for row in self.pas_df.itertuples(index=False):
+            pid = int(row.pas_id)
+            id_to_rep[pid] = row.rep_cs
+            id_to_rpm[pid] = float(row.atlas_rpm)
+            rep_to_coords[row.rep_cs] = (
+                row.chrom, int(row.start), int(row.end), row.strand
+            )
+
+        seg_id_map = self._assign_segment_ids()
+
+        tsv_rows: list[dict] = []
+        debug_rows: list[dict] = []
+        seen_pas: set[str] = set()
+
+        for gene in self.genes.values():
+            first_tx = next(iter(gene.transcripts.values()), None)
+            g_chrom = (
+                first_tx.regions[0].chrom
+                if first_tx and first_tx.regions
+                else ""
+            )
+            g_strand = first_tx.strand if first_tx else ""
+            g_start, g_end = (
+                self._gene_extent(gene)
+                if gene.transcripts
+                else (0, 0)
+            )
+
+            if out_debug_bed:
+                debug_rows.append({
+                    "chrom": g_chrom, "start": g_start,
+                    "end": g_end, "id": gene.gene_id,
+                    "type": "gene", "strand": g_strand,
+                })
+
+            for segment in gene.segments:
+                seg_num = segment.attributes["segment_number"]
+                seg_id = seg_id_map.get(
+                    (gene.gene_id, seg_num),
+                    f"{gene.gene_id}:E001",
+                )
+
+                if out_debug_bed:
+                    debug_rows.append({
+                        "chrom": segment.chrom,
+                        "start": segment.start,
+                        "end": segment.end,
+                        "id": seg_id,
+                        "type": "segment",
+                        "strand": segment.strand,
+                    })
+
+                if not segment.subsegments:
+                    continue  # no PAS overlap → skip from TSV
+
+                for sub in segment.subsegments:
+                    sub_num = sub.attributes["subsegment_number"]
+                    sub_id = f"{seg_id}:{sub_num:03d}"
+                    int_pid = sub.attributes.get("pas_id")
+                    if int_pid is not None and int_pid != ".":
+                        rep_cs = id_to_rep.get(int(int_pid), ".")
+                        rpm = id_to_rpm.get(int(int_pid), 0.0)
+                    else:
+                        rep_cs = "."
+                        rpm = 0.0
+
+                    tsv_rows.append({
+                        "chrom": sub.chrom,
+                        "start": sub.start,
+                        "end": sub.end,
+                        "subsegment_id": sub_id,
+                        "strand": sub.strand,
+                        "overlapping_pas_id": rep_cs,
+                        "atlas_rpm": rpm,
+                    })
+
+                    if out_debug_bed:
+                        debug_rows.append({
+                            "chrom": sub.chrom,
+                            "start": sub.start,
+                            "end": sub.end,
+                            "id": sub_id,
+                            "type": "subsegment",
+                            "strand": sub.strand,
+                        })
+                        if rep_cs != "." and rep_cs not in seen_pas:
+                            seen_pas.add(rep_cs)
+                            coords = rep_to_coords.get(rep_cs)
+                            if coords:
+                                pc, ps, pe, pstr = coords
+                                debug_rows.append({
+                                    "chrom": pc,
+                                    "start": ps,
+                                    "end": pe,
+                                    "id": rep_cs,
+                                    "type": "pas",
+                                    "strand": pstr,
+                                })
+
+        tsv_df = pd.DataFrame(
+            tsv_rows,
+            columns=[
+                "chrom", "start", "end", "subsegment_id",
+                "strand", "overlapping_pas_id", "atlas_rpm",
+            ],
+        )
+        tsv_df.to_csv(out_tsv, sep="\t", index=False)
+        logger.info(
+            "Segments TSV written to %s (%d subsegments)",
+            out_tsv, len(tsv_df),
+        )
+
+        if out_debug_bed and debug_rows:
+            debug_df = pd.DataFrame(
+                debug_rows,
+                columns=["chrom", "start", "end", "id", "type", "strand"],
+            )
+            debug_df.to_csv(
+                out_debug_bed, sep="\t", index=False, header=False
+            )
+            logger.info("Debug BED written to %s", out_debug_bed)
+
     def write_segments_pas_to_bed(
         self,
         out_genes_bed: str,
@@ -976,49 +1180,68 @@ class ConstructSegments:
         """Build a DataFrame of all sub-segments for coverage calculations.
 
         Iterates over ``gene.segments`` and collects every sub-segment
-        with a non-zero length into a flat table.
+        with a non-zero length into a flat table using the same
+        human-readable ID scheme as :meth:`create_segments_tsv`.
+
+        ``pas_id`` is set to the representative cleavage-site string
+        (e.g. ``"chr1:65435"``) for sub-segments that terminate at a
+        PAS, and ``"."`` for trailing sub-segments.
 
         Returns:
-            A DataFrame with columns ``gene_unique_id``,
-            ``segment_number``, ``subsegment_number``, ``chrom``,
-            ``start``, ``end``, ``strand``, ``pas_id``.
+            A DataFrame with columns ``gene_id``, ``segment_id``,
+            ``subsegment_id``, ``chrom``, ``start``, ``end``,
+            ``strand``, ``pas_id``.
         """
+        assert self.pas_df is not None, (
+            "process_pas_atlas() must be called before "
+            "create_subsegments_dataframe()"
+        )
+        id_to_rep: dict[int, str] = {
+            int(row.pas_id): row.rep_cs
+            for row in self.pas_df.itertuples(index=False)
+        }
+        seg_id_map = self._assign_segment_ids()
+
         rows: list[dict] = []
         for gene in self.genes.values():
             for segment in gene.segments:
                 if not segment.subsegments:
                     continue
+                seg_num = segment.attributes["segment_number"]
+                seg_id = seg_id_map.get(
+                    (gene.gene_id, seg_num),
+                    f"{gene.gene_id}:E001",
+                )
                 for sub in segment.subsegments:
-                    if sub.end - sub.start > 0:
-                        rows.append(
-                            {
-                                "gene_unique_id": (
-                                    self.gene_mapping[gene.gene_id]
-                                ),
-                                "segment_number": (
-                                    segment.attributes["segment_number"]
-                                ),
-                                "subsegment_number": (
-                                    sub.attributes["subsegment_number"]
-                                ),
-                                "chrom": sub.chrom,
-                                "start": sub.start,
-                                "end": sub.end,
-                                "strand": sub.strand,
-                                "pas_id": sub.attributes.get("pas_id", "."),
-                            }
-                        )
+                    if sub.end - sub.start <= 0:
+                        continue
+                    sub_num = sub.attributes["subsegment_number"]
+                    raw_pid = sub.attributes.get("pas_id")
+                    if raw_pid is not None and raw_pid != ".":
+                        pas_id = id_to_rep.get(int(raw_pid), ".")
+                    else:
+                        pas_id = "."
+                    rows.append(
+                        {
+                            "gene_id": gene.gene_id,
+                            "segment_id": seg_id,
+                            "subsegment_id": f"{seg_id}:{sub_num:03d}",
+                            "chrom": sub.chrom,
+                            "start": sub.start,
+                            "end": sub.end,
+                            "strand": sub.strand,
+                            "pas_id": pas_id,
+                        }
+                    )
         return pd.DataFrame(rows)
 
-    def run(
-        self,
-        out_genes_bed: str,
-        out_segments_bed: str,
-        out_subsegments_bed: str,
-        out_pas_bed: str,
-        merge_distance: int = 5,
-    ) -> None:
-        """Execute the full segment-construction pipeline.
+    def compute(self, merge_distance: int = 5) -> None:
+        """Execute all in-memory segmentation steps.
+
+        Runs the complete pipeline through to sub-segment construction
+        without writing any output files.  Call this before
+        :meth:`create_segments_tsv` or
+        :meth:`create_subsegments_dataframe`.
 
         Steps, in order:
 
@@ -1029,14 +1252,8 @@ class ConstructSegments:
         5. Construct non-overlapping segments per gene.
         6. Read and merge the PAS atlas.
         7. Identify PAS within segments and build sub-segments.
-        8. Write all output BED files.
 
         Args:
-            out_genes_bed: Output path for the genes BED file.
-            out_segments_bed: Output path for the segments BED file.
-            out_subsegments_bed: Output path for the sub-segments BED
-                file.
-            out_pas_bed: Output path for the merged PAS BED file.
             merge_distance: Maximum gap (in bp) for merging adjacent
                 PAS sites in the atlas.
         """
@@ -1068,13 +1285,23 @@ class ConstructSegments:
         )
         self.identify_pas_in_segments(pas_trees)
 
-        logger.info(
-            "Writing genes, segments, subsegments, and merged PAS "
-            "to BED/TSV..."
-        )
-        self.write_segments_pas_to_bed(
-            out_genes_bed,
-            out_segments_bed,
-            out_subsegments_bed,
-            out_pas_bed,
-        )
+    def run(
+        self,
+        out_tsv: str,
+        merge_distance: int = 5,
+        out_debug_bed: str | None = None,
+    ) -> None:
+        """Run the full segmentation pipeline and write output files.
+
+        Calls :meth:`compute` to build all in-memory data structures,
+        then writes the segments TSV via :meth:`create_segments_tsv`.
+
+        Args:
+            out_tsv: Output path for the segments TSV.
+            merge_distance: Maximum gap (in bp) for merging adjacent
+                PAS sites in the atlas.
+            out_debug_bed: Optional path for the debug BED file
+                (written only when provided).
+        """
+        self.compute(merge_distance)
+        self.create_segments_tsv(out_tsv, out_debug_bed=out_debug_bed)
