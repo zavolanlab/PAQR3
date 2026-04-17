@@ -82,10 +82,9 @@ class PAQR3:
         """
         out_dir = output_dir or self.output_dir
         os.makedirs(out_dir, exist_ok=True)
-        sname = os.path.basename(self.coverage_bw_pos).split(".")[0]
-        segments_tsv = os.path.join(out_dir, f"{sname}_segments.tsv")
+        segments_tsv = os.path.join(out_dir, "output_segments.tsv")
         debug_bed = (
-            os.path.join(out_dir, f"{sname}_debug.bed")
+            os.path.join(out_dir, "output_segments_debug.bed")
             if self.debug
             else None
         )
@@ -99,7 +98,7 @@ class PAQR3:
             merge_distance=self.merge_distance,
             out_debug_bed=debug_bed,
         )
-        logger.info("Segmentation complete. TSV: %s", segments_tsv)
+        logger.info("Segmentation complete. Output: %s", segments_tsv)
         return segments_tsv
 
     def run_quant(
@@ -133,9 +132,6 @@ class PAQR3:
         posterior_tsv = os.path.join(
             results_dir, f"{sname}_posterior_usage.tsv"
         )
-        gene_tsv = os.path.join(
-            results_dir, f"{sname}_gene_level_usage.tsv"
-        )
         coverage_tsv = os.path.join(results_dir, f"{sname}_coverage.tsv")
         debug_json = os.path.join(results_dir, f"{sname}_debug.json")
 
@@ -161,7 +157,7 @@ class PAQR3:
         usage_df = cc.run(
             subsegments_df,
             output_raw_tsv=coverage_tsv if self.debug else None,
-            output_final_tsv=usage_tsv,
+            output_final_tsv=usage_tsv if self.debug else None,
             output_debug_json=debug_json if self.debug else None,
             n_threads=self.n_threads,
             max_pas_count=self.max_pas_count,
@@ -181,12 +177,16 @@ class PAQR3:
 
         cpu = CalculatePosteriorUsage(weight=self.posterior_usage_weight)
         posterior_df = cpu.compute(usage_df)
-        posterior_df.to_csv(posterior_tsv, sep="\t", index=False)
-        logger.info("Posterior usage written to %s", posterior_tsv)
 
         gene_usage_df = CalculateGeneLevelUsage(posterior_df).compute()
-        gene_usage_df.to_csv(gene_tsv, sep="\t", index=False)
-        logger.info("Gene-level usage written to %s", gene_tsv)
+
+        # Merge gene_weighted_usage into posterior output; drop redundant
+        # gene_id and segment_id columns (subsegment_id encodes both).
+        posterior_out = posterior_df.merge(
+            gene_usage_df, on="gene_id", how="left"
+        ).drop(columns=["gene_id", "segment_id"])
+        posterior_out.to_csv(posterior_tsv, sep="\t", index=False)
+        logger.info("Posterior usage written to %s", posterior_tsv)
         logger.info("Quantification complete.")
 
     def run_full(self) -> None:
@@ -225,9 +225,6 @@ class PAQR3:
         posterior_tsv = os.path.join(
             results_dir, f"{sname}_posterior_usage.tsv"
         )
-        gene_tsv = os.path.join(
-            results_dir, f"{sname}_gene_level_usage.tsv"
-        )
         coverage_tsv = os.path.join(results_dir, f"{sname}_coverage.tsv")
         debug_json = os.path.join(results_dir, f"{sname}_debug.json")
 
@@ -240,7 +237,7 @@ class PAQR3:
         usage_df = cc.run(
             subsegments_df,
             output_raw_tsv=coverage_tsv if self.debug else None,
-            output_final_tsv=usage_tsv,
+            output_final_tsv=usage_tsv if self.debug else None,
             output_debug_json=debug_json if self.debug else None,
             n_threads=self.n_threads,
             max_pas_count=self.max_pas_count,
@@ -260,10 +257,14 @@ class PAQR3:
 
         cpu = CalculatePosteriorUsage(weight=self.posterior_usage_weight)
         posterior_df = cpu.compute(usage_df)
-        posterior_df.to_csv(posterior_tsv, sep="\t", index=False)
-        logger.info("Posterior usage written to %s", posterior_tsv)
 
         gene_usage_df = CalculateGeneLevelUsage(posterior_df).compute()
-        gene_usage_df.to_csv(gene_tsv, sep="\t", index=False)
-        logger.info("Gene-level usage written to %s", gene_tsv)
+
+        # Merge gene_weighted_usage into posterior output; drop redundant
+        # gene_id and segment_id columns (subsegment_id encodes both).
+        posterior_out = posterior_df.merge(
+            gene_usage_df, on="gene_id", how="left"
+        ).drop(columns=["gene_id", "segment_id"])
+        posterior_out.to_csv(posterior_tsv, sep="\t", index=False)
+        logger.info("Posterior usage written to %s", posterior_tsv)
         logger.info("PAQR3 pipeline completed.")

@@ -93,12 +93,16 @@ def _add_segment_args(p: argparse.ArgumentParser) -> None:
 def _add_quant_args(p: argparse.ArgumentParser) -> None:
     """Add arguments specific to the quantification stage."""
     p.add_argument(
-        "--coverage",
-        "-c",
+        "--coverage_pos",
+        "-c_pos",
         required=True,
-        nargs=2,
-        metavar=("POS_BW", "NEG_BW"),
-        help="Paths to the positive- and negative-strand coverage BigWig files.",
+        help="Path to the positive-strand coverage BigWig file.",
+    )
+    p.add_argument(
+        "--coverage_neg",
+        "-c_neg",
+        required=True,
+        help="Path to the negative-strand coverage BigWig file.",
     )
     p.add_argument(
         "--max_pas_count",
@@ -161,14 +165,14 @@ def _run_segment(args: argparse.Namespace) -> None:
 
 def _run_quant(args: argparse.Namespace) -> None:
     _require_file(args.segments_tsv, "--segments_tsv")
-    _require_file(args.coverage[0], "--coverage")
-    _require_file(args.coverage[1], "--coverage")
+    _require_file(args.coverage_pos, "--coverage_pos")
+    _require_file(args.coverage_neg, "--coverage_neg")
     logger.info("Starting PAQR3 quantification...")
     paqr3 = PAQR3(
         annotation_file="",  # not used in quant mode
         pas_atlas_file="",
-        coverage_bw_pos=args.coverage[0],
-        coverage_bw_neg=args.coverage[1],
+        coverage_bw_pos=args.coverage_pos,
+        coverage_bw_neg=args.coverage_neg,
         output_dir=args.output_dir,
         downstream_exon_extension=0,
         merge_distance=0,
@@ -185,14 +189,14 @@ def _run_quant(args: argparse.Namespace) -> None:
 def _run_full(args: argparse.Namespace) -> None:
     _require_file(args.annotation, "--annotation")
     _require_file(args.pas_atlas, "--pas_atlas")
-    _require_file(args.coverage[0], "--coverage")
-    _require_file(args.coverage[1], "--coverage")
+    _require_file(args.coverage_pos, "--coverage_pos")
+    _require_file(args.coverage_neg, "--coverage_neg")
     logger.info("Starting PAQR3 full pipeline...")
     paqr3 = PAQR3(
         annotation_file=args.annotation,
         pas_atlas_file=args.pas_atlas,
-        coverage_bw_pos=args.coverage[0],
-        coverage_bw_neg=args.coverage[1],
+        coverage_bw_pos=args.coverage_pos,
+        coverage_bw_neg=args.coverage_neg,
         output_dir=args.output_dir,
         downstream_exon_extension=args.downstream_exon_extension,
         merge_distance=args.merge_distance,

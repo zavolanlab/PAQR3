@@ -999,7 +999,8 @@ class CalculateCoverages:
 .create_subsegments_dataframe`.
             output_raw_tsv: Path for the intermediate coverage TSV, or
                 ``None`` to skip the raw-TSV step entirely.
-            output_final_tsv: Path for the final per-PAS usage TSV.
+            output_final_tsv: Path for the final per-PAS usage TSV, or
+                ``None`` to skip writing (debug-only output).
             output_debug_json: Optional path for a JSON debug dump of
                 all evaluated patterns.
             n_threads: Number of threads for BigWig reading *and*
@@ -1057,8 +1058,8 @@ class CalculateCoverages:
             )
             self.write_coverage_results(cov_df.copy(), output_raw_tsv)
 
-        # Step 3: PAS usage via F-statistics
-        logger.info("Step 3: Evaluating PAS usage models via F-statistics...")
+        # Step 2: PAS usage via F-statistics
+        logger.info("Step 2: Evaluating PAS usage models via F-statistics...")
         # prefer the passed-in threshold, else use the one from __init__
         thr = (
             f_stat_threshold
@@ -1076,14 +1077,17 @@ class CalculateCoverages:
 
         # free memory from raw coverage arrays
         del raw_cov_df
+
         # Step 3: per-segment expression stats (if BAM provided)
         if self.bam_file:
+            logger.info("Step 3: Computing per-segment expression stats...")
             refined_usage_df = self.calculate_segment_expression_stats(
                 refined_usage_df, subsegments_df
             )
 
-        # Final write
-        self.write_coverage_results(refined_usage_df, output_final_tsv)
+        # Final write (debug-only; skipped when output_final_tsv is None)
+        if output_final_tsv:
+            self.write_coverage_results(refined_usage_df, output_final_tsv)
 
         end_time = time.time()
         logger.info("PAS usage evaluation complete.")
