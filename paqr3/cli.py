@@ -48,7 +48,7 @@ def _require_file(path: str, flag: str) -> None:
 def _add_common_args(p: argparse.ArgumentParser) -> None:
     """Arguments required by every sub-command."""
     p.add_argument(
-        "--output_dir",
+        "--output-dir",
         "-o",
         required=True,
         help="Path to the output directory.",
@@ -69,20 +69,20 @@ def _add_segment_args(p: argparse.ArgumentParser) -> None:
         help="Path to the annotation GTF file.",
     )
     p.add_argument(
-        "--pas_atlas",
+        "--pas-atlas",
         "-pa",
         required=True,
         help="Path to the PAS atlas BED file.",
     )
     p.add_argument(
-        "--downstream_exon_extension",
+        "--downstream-exon-extension",
         "-de",
         type=int,
         default=200,
         help="Bases to extend terminal exons downstream (default: 200).",
     )
     p.add_argument(
-        "--merge_distance",
+        "--merge-distance",
         "-md",
         type=int,
         default=5,
@@ -93,19 +93,28 @@ def _add_segment_args(p: argparse.ArgumentParser) -> None:
 def _add_quant_args(p: argparse.ArgumentParser) -> None:
     """Add arguments specific to the quantification stage."""
     p.add_argument(
-        "--coverage_pos",
-        "-c_pos",
+        "--coverage-pos",
+        "-c-pos",
         required=True,
         help="Path to the positive-strand coverage BigWig file.",
     )
     p.add_argument(
-        "--coverage_neg",
-        "-c_neg",
+        "--coverage-neg",
+        "-c-neg",
         required=True,
         help="Path to the negative-strand coverage BigWig file.",
     )
     p.add_argument(
-        "--max_pas_count",
+        "--sample-id",
+        "-sid",
+        default=None,
+        help=(
+            "Sample identifier used for output filenames and directory. "
+            "Defaults to the BigWig filename stem (before the first '.')."
+        ),
+    )
+    p.add_argument(
+        "--max-pas-count",
         "-mpc",
         type=int,
         default=10,
@@ -118,14 +127,14 @@ def _add_quant_args(p: argparse.ArgumentParser) -> None:
         help="Path to the aligned BAM file for expression rank statistics (optional).",
     )
     p.add_argument(
-        "--f_stat_threshold",
+        "--f-stat-threshold",
         "-fst",
         type=int,
         default=100,
         help="F-statistic threshold for PAS usage (default: 100).",
     )
     p.add_argument(
-        "--posterior_usage_weight",
+        "--posterior-usage-weight",
         "-puw",
         type=float,
         default=0.1,
@@ -147,7 +156,7 @@ def _add_quant_args(p: argparse.ArgumentParser) -> None:
 
 def _run_segment(args: argparse.Namespace) -> None:
     _require_file(args.annotation, "--annotation")
-    _require_file(args.pas_atlas, "--pas_atlas")
+    _require_file(args.pas_atlas, "--pas-atlas")
     logger.info("Starting PAQR3 segmentation...")
     paqr3 = PAQR3(
         annotation_file=args.annotation,
@@ -164,9 +173,9 @@ def _run_segment(args: argparse.Namespace) -> None:
 
 
 def _run_quant(args: argparse.Namespace) -> None:
-    _require_file(args.segments_tsv, "--segments_tsv")
-    _require_file(args.coverage_pos, "--coverage_pos")
-    _require_file(args.coverage_neg, "--coverage_neg")
+    _require_file(args.segments_tsv, "--segments-tsv")
+    _require_file(args.coverage_pos, "--coverage-pos")
+    _require_file(args.coverage_neg, "--coverage-neg")
     logger.info("Starting PAQR3 quantification...")
     paqr3 = PAQR3(
         annotation_file="",  # not used in quant mode
@@ -183,14 +192,14 @@ def _run_quant(args: argparse.Namespace) -> None:
         n_threads=args.threads,
         debug=args.debug,
     )
-    paqr3.run_quant(args.segments_tsv)
+    paqr3.run_quant(args.segments_tsv, sample_name=args.sample_id)
 
 
 def _run_full(args: argparse.Namespace) -> None:
     _require_file(args.annotation, "--annotation")
-    _require_file(args.pas_atlas, "--pas_atlas")
-    _require_file(args.coverage_pos, "--coverage_pos")
-    _require_file(args.coverage_neg, "--coverage_neg")
+    _require_file(args.pas_atlas, "--pas-atlas")
+    _require_file(args.coverage_pos, "--coverage-pos")
+    _require_file(args.coverage_neg, "--coverage-neg")
     logger.info("Starting PAQR3 full pipeline...")
     paqr3 = PAQR3(
         annotation_file=args.annotation,
@@ -207,7 +216,7 @@ def _run_full(args: argparse.Namespace) -> None:
         n_threads=args.threads,
         debug=args.debug,
     )
-    paqr3.run_full()
+    paqr3.run_full(sample_name=args.sample_id)
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +270,7 @@ def main() -> None:
     )
     _add_common_args(p_quant)
     p_quant.add_argument(
-        "--segments_tsv",
+        "--segments-tsv",
         "-s",
         required=True,
         help="Path to the segments TSV produced by 'paqr3 segment'.",

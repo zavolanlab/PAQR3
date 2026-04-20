@@ -116,13 +116,16 @@ class PAQR3:
             sample_name: Override the sample name derived from the
                 BigWig filename.
         """
-        pos_stem = self._sample_name()
-        neg_stem = os.path.basename(self.coverage_bw_neg).split(".")[0]
-        if pos_stem != neg_stem:
-            raise ValueError(
-                "Coverage files must share the same sample name."
-            )
-        sname = sample_name or pos_stem
+        if sample_name is not None:
+            sname = sample_name
+        else:
+            pos_stem = self._sample_name()
+            neg_stem = os.path.basename(self.coverage_bw_neg).split(".")[0]
+            if pos_stem != neg_stem:
+                raise ValueError(
+                    "Coverage files must share the same sample name."
+                )
+            sname = pos_stem
         results_dir = (
             output_dir or self._make_results_dir(sname)
         )
@@ -189,14 +192,22 @@ class PAQR3:
         logger.info("Posterior usage written to %s", posterior_tsv)
         logger.info("Quantification complete.")
 
-    def run_full(self) -> None:
-        """Run segmentation and quantification end-to-end."""
-        sname = self._sample_name()
-        neg_stem = os.path.basename(self.coverage_bw_neg).split(".")[0]
-        if sname != neg_stem:
-            raise ValueError(
-                "Coverage files must share the same sample name."
-            )
+    def run_full(self, sample_name: str | None = None) -> None:
+        """Run segmentation and quantification end-to-end.
+
+        Args:
+            sample_name: Override the sample name derived from the
+                BigWig filename.
+        """
+        if sample_name is not None:
+            sname = sample_name
+        else:
+            sname = self._sample_name()
+            neg_stem = os.path.basename(self.coverage_bw_neg).split(".")[0]
+            if sname != neg_stem:
+                raise ValueError(
+                    "Coverage files must share the same sample name."
+                )
         results_dir = self._make_results_dir(sname)
 
         segments_tsv = os.path.join(results_dir, f"{sname}_segments.tsv")
@@ -217,6 +228,7 @@ class PAQR3:
             merge_distance=self.merge_distance,
             out_debug_bed=debug_bed,
         )
+        assert cs.pas_df is not None, "ConstructSegments.run() must set pas_df"
 
         # Stage 2: use in-memory DataFrame (avoids re-reading the TSV).
         subsegments_df = cs.create_subsegments_dataframe()
