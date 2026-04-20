@@ -1,122 +1,300 @@
+"""Command-line interface for PAQR3.
+
+Three sub-commands are exposed:
+
+- ``paqr3 segment`` — run only the segmentation stage.
+- ``paqr3 quant``   — run only the quantification stage.
+- ``paqr3 full``    — run both stages end-to-end.
+"""
+
 import argparse
+import logging
+import sys
+from pathlib import Path
+
 from paqr3.version import __version__
 from paqr3.paqr3 import PAQR3
-from paqr3.construct_segments import log_message
 
-
-def main():
-    parser = argparse.ArgumentParser(
-        description=("Construct genomic segments from RNA-Seq annotations.")
+logging.basicConfig(
+    format="[{asctime}] {message}",
+    style="{",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO,
+)
+logging.getLogger().handlers.clear()
+_handler = logging.StreamHandler()
+_handler.setFormatter(
+    logging.Formatter(
+        "[{asctime}] {message}", style="{", datefmt="%Y-%m-%d %H:%M:%S"
     )
-    parser.add_argument(
+)
+logging.getLogger().addHandler(_handler)
+logging.getLogger().setLevel(logging.INFO)
+
+logger = logging.getLogger(__name__)
+
+
+def _require_file(path: str, flag: str) -> None:
+    if not Path(path).is_file():
+        print(f"Error: {flag} file not found: {path}", file=sys.stderr)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Shared argument groups
+# ---------------------------------------------------------------------------
+
+
+def _add_common_args(p: argparse.ArgumentParser) -> None:
+    """Arguments required by every sub-command."""
+    p.add_argument(
+        "--output-dir",
+        "-o",
+        required=True,
+        help="Path to the output directory.",
+    )
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug output files (default: off).",
+    )
+
+
+def _add_segment_args(p: argparse.ArgumentParser) -> None:
+    """Add arguments specific to the segmentation stage."""
+    p.add_argument(
         "--annotation",
         "-a",
-        type=str,
         required=True,
         help="Path to the annotation GTF file.",
     )
-    parser.add_argument(
-        "--downstream_exon_extension",
-        "-de",
-        type=int,
-        default=200,
-        help="Number of bases to extend terminal exons.",
-    )
-    parser.add_argument(
-        "--pas_atlas",
+    p.add_argument(
+        "--pas-atlas",
         "-pa",
-        type=str,
         required=True,
         help="Path to the PAS atlas BED file.",
     )
-    parser.add_argument(
+    p.add_argument(
+        "--downstream-exon-extension",
+        "-de",
+        type=int,
+        default=200,
+        help="Bases to extend terminal exons downstream (default: 200).",
+    )
+    p.add_argument(
         "--merge-distance",
         "-md",
         type=int,
         default=5,
-        help="Merge PAS sites that are within this distance (in base pairs). Set to 0 to disable merging.",
+        help="Merge PAS sites within this distance in bp (default: 5; 0 to disable).",
     )
-    parser.add_argument(
-        "--coverage",
-        "-c",
-        type=str,
+
+
+def _add_quant_args(p: argparse.ArgumentParser) -> None:
+    """Add arguments specific to the quantification stage."""
+    p.add_argument(
+        "--coverage-pos",
+        "-c-pos",
         required=True,
-        nargs=2,
+        help="Path to the positive-strand coverage BigWig file.",
+    )
+    p.add_argument(
+        "--coverage-neg",
+        "-c-neg",
+        required=True,
+        help="Path to the negative-strand coverage BigWig file.",
+    )
+    p.add_argument(
+        "--sample-id",
+        "-sid",
+        default=None,
         help=(
-            "Paths to the positive and negative strand coverage bigWig files"
-            " (e.g., pos.bw neg.bw)."
+            "Sample identifier used for output filenames and directory. "
+            "Defaults to the BigWig filename stem (before the first '.')."
         ),
     )
-    parser.add_argument(
-        "--output_dir",
-        "-o",
-        type=str,
-        required=True,
-        help="Path to the output directory.",
-    )
-    parser.add_argument(
-        "--max_pas_count",
+    p.add_argument(
+        "--max-pas-count",
         "-mpc",
         type=int,
         default=10,
-        help="Only evaluate segments with this number or fewer PAS.",
+        help="Skip segments with more PAS than this (default: 10).",
     )
-    parser.add_argument(
+    p.add_argument(
         "--bam",
         "-b",
-        type=str,
         default=None,
-        help="Path to the aligned RNA-Seq BAM file for segment read counts (optional).",
+        help="Path to the aligned BAM file for expression rank statistics (optional).",
     )
-    parser.add_argument(
-        "--f_stat_threshold",
+    p.add_argument(
+        "--f-stat-threshold",
         "-fst",
         type=int,
         default=100,
-        help="F-statistic threshold for PAS usage evaluation.",
+        help="F-statistic threshold for PAS usage (default: 100).",
     )
-    parser.add_argument(
-        "--posterior_usage_weight",
+    p.add_argument(
+        "--posterior-usage-weight",
         "-puw",
         type=float,
         default=0.1,
-        help="Weight to combine RNA-seq and atlas RPMs for posterior PAS usage (default: 0.1)",
+        help="Weight for observed RPM in posterior blending (default: 0.1).",
     )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug output (default: off)",
+    p.add_argument(
+        "--threads",
+        "-t",
+        type=int,
+        default=1,
+        help="Threads for BigWig reading and F-stat worker processes (default: 1).",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sub-command handlers
+# ---------------------------------------------------------------------------
+
+
+def _run_segment(args: argparse.Namespace) -> None:
+    _require_file(args.annotation, "--annotation")
+    _require_file(args.pas_atlas, "--pas-atlas")
+    logger.info("Starting PAQR3 segmentation...")
+    paqr3 = PAQR3(
+        annotation_file=args.annotation,
+        pas_atlas_file=args.pas_atlas,
+        coverage_bw_pos="",  # not used in segment mode
+        coverage_bw_neg="",
+        output_dir=args.output_dir,
+        downstream_exon_extension=args.downstream_exon_extension,
+        merge_distance=args.merge_distance,
+        max_pas_count=0,
+        debug=args.debug,
+    )
+    paqr3.run_segment()
+
+
+def _run_quant(args: argparse.Namespace) -> None:
+    _require_file(args.segments_tsv, "--segments-tsv")
+    _require_file(args.coverage_pos, "--coverage-pos")
+    _require_file(args.coverage_neg, "--coverage-neg")
+    logger.info("Starting PAQR3 quantification...")
+    paqr3 = PAQR3(
+        annotation_file="",  # not used in quant mode
+        pas_atlas_file="",
+        coverage_bw_pos=args.coverage_pos,
+        coverage_bw_neg=args.coverage_neg,
+        output_dir=args.output_dir,
+        downstream_exon_extension=0,
+        merge_distance=0,
+        max_pas_count=args.max_pas_count,
+        bam_file=args.bam,
+        f_stat_threshold=args.f_stat_threshold,
+        posterior_usage_weight=args.posterior_usage_weight,
+        n_threads=args.threads,
+        debug=args.debug,
+    )
+    paqr3.run_quant(args.segments_tsv, sample_name=args.sample_id)
+
+
+def _run_full(args: argparse.Namespace) -> None:
+    _require_file(args.annotation, "--annotation")
+    _require_file(args.pas_atlas, "--pas-atlas")
+    _require_file(args.coverage_pos, "--coverage-pos")
+    _require_file(args.coverage_neg, "--coverage-neg")
+    logger.info("Starting PAQR3 full pipeline...")
+    paqr3 = PAQR3(
+        annotation_file=args.annotation,
+        pas_atlas_file=args.pas_atlas,
+        coverage_bw_pos=args.coverage_pos,
+        coverage_bw_neg=args.coverage_neg,
+        output_dir=args.output_dir,
+        downstream_exon_extension=args.downstream_exon_extension,
+        merge_distance=args.merge_distance,
+        max_pas_count=args.max_pas_count,
+        bam_file=args.bam,
+        f_stat_threshold=args.f_stat_threshold,
+        posterior_usage_weight=args.posterior_usage_weight,
+        n_threads=args.threads,
+        debug=args.debug,
+    )
+    paqr3.run_full(sample_name=args.sample_id)
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="paqr3",
+        description=(
+            "PAQR3: Poly(A) site quantification on standard RNA-Seq data."
+        ),
     )
     parser.add_argument(
         "--version",
         "-v",
         action="version",
         version=(
-            f"PAQR3 v{__version__},"
+            f"PAQR3 v{__version__}, "
             "(c) 2025 by Zavolab (zavolab-biozentrum@unibas.ch)"
         ),
-        help="Show version information and exit",
     )
+
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+    sub.required = True
+
+    # ---- segment ----
+    p_seg = sub.add_parser(
+        "segment",
+        help="Run annotation-based segmentation only.",
+        description=(
+            "Parse a GTF annotation, extend terminal exons, merge PAS "
+            "sites and build sub-segments.  Produces a segments TSV "
+            "(plus a debug BED when --debug is set)."
+        ),
+    )
+    _add_common_args(p_seg)
+    _add_segment_args(p_seg)
+    p_seg.set_defaults(func=_run_segment)
+
+    # ---- quant ----
+    p_quant = sub.add_parser(
+        "quant",
+        help="Run quantification from a segments TSV.",
+        description=(
+            "Read a segments TSV produced by 'paqr3 segment', compute "
+            "coverage metrics, evaluate PAS usage models and output "
+            "posterior usage and gene-level summaries."
+        ),
+    )
+    _add_common_args(p_quant)
+    p_quant.add_argument(
+        "--segments-tsv",
+        "-s",
+        required=True,
+        help="Path to the segments TSV produced by 'paqr3 segment'.",
+    )
+    _add_quant_args(p_quant)
+    p_quant.set_defaults(func=_run_quant)
+
+    # ---- full ----
+    p_full = sub.add_parser(
+        "full",
+        help="Run segmentation and quantification end-to-end.",
+        description=(
+            "Run the complete PAQR3 pipeline: segmentation followed by "
+            "quantification.  Equivalent to 'paqr3 segment' then "
+            "'paqr3 quant'."
+        ),
+    )
+    _add_common_args(p_full)
+    _add_segment_args(p_full)
+    _add_quant_args(p_full)
+    p_full.set_defaults(func=_run_full)
 
     args = parser.parse_args()
-
-    log_message("Starting PAQR3 pipeline...")
-
-    paqr3_instance = PAQR3(
-        args.annotation,
-        args.pas_atlas,
-        args.coverage[0],
-        args.coverage[1],
-        args.output_dir,
-        args.downstream_exon_extension,
-        args.merge_distance,
-        args.max_pas_count,
-        args.bam,
-        args.f_stat_threshold,
-        args.posterior_usage_weight,
-        args.debug,
-    )
-    paqr3_instance.run()
+    args.func(args)
 
 
 if __name__ == "__main__":
