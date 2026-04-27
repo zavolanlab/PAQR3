@@ -45,6 +45,12 @@ def _require_file(path: str, flag: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+_EMIT_CHOICES = [
+    "final", "mean_cov", "rna_u", "obs_rpm", "post_rpm",
+    "all", "debug", "segment",
+]
+
+
 def _add_common_args(p: argparse.ArgumentParser) -> None:
     """Arguments required by every sub-command."""
     p.add_argument(
@@ -54,9 +60,26 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
         help="Path to the output directory.",
     )
     p.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug output files (default: off).",
+        "--verbosity",
+        "-v",
+        choices=["INFO", "DEBUG"],
+        default="INFO",
+        help="Log verbosity level (default: INFO).",
+    )
+    p.add_argument(
+        "--emit",
+        "-e",
+        nargs="+",
+        choices=_EMIT_CHOICES,
+        default=None,
+        metavar="MODE",
+        help=(
+            "Additional outputs to emit.  Choices: "
+            + ", ".join(_EMIT_CHOICES)
+            + ".  'all' emits all BigWig modes; 'debug' adds"
+            " all BigWigs plus a per-pattern JSON dump."
+            " Default: none (only posterior_usage.tsv.gz is written)."
+        ),
     )
 
 
@@ -154,7 +177,15 @@ def _add_quant_args(p: argparse.ArgumentParser) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _set_verbosity(args: argparse.Namespace) -> None:
+    """Apply the --verbosity choice to the root logger."""
+    level = logging.DEBUG if args.verbosity == "DEBUG" else logging.INFO
+    logging.getLogger().setLevel(level)
+
+
 def _run_segment(args: argparse.Namespace) -> None:
+    """Handle the ``segment`` sub-command."""
+    _set_verbosity(args)
     _require_file(args.annotation, "--annotation")
     _require_file(args.pas_atlas, "--pas-atlas")
     logger.info("Starting PAQR3 segmentation...")
@@ -167,12 +198,14 @@ def _run_segment(args: argparse.Namespace) -> None:
         downstream_exon_extension=args.downstream_exon_extension,
         merge_distance=args.merge_distance,
         max_pas_count=0,
-        debug=args.debug,
+        emit=args.emit,
     )
     paqr3.run_segment()
 
 
 def _run_quant(args: argparse.Namespace) -> None:
+    """Handle the ``quant`` sub-command."""
+    _set_verbosity(args)
     _require_file(args.segments_tsv, "--segments-tsv")
     _require_file(args.coverage_pos, "--coverage-pos")
     _require_file(args.coverage_neg, "--coverage-neg")
@@ -190,12 +223,14 @@ def _run_quant(args: argparse.Namespace) -> None:
         f_stat_threshold=args.f_stat_threshold,
         posterior_usage_weight=args.posterior_usage_weight,
         n_threads=args.threads,
-        debug=args.debug,
+        emit=args.emit,
     )
     paqr3.run_quant(args.segments_tsv, sample_name=args.sample_id)
 
 
 def _run_full(args: argparse.Namespace) -> None:
+    """Handle the ``full`` sub-command."""
+    _set_verbosity(args)
     _require_file(args.annotation, "--annotation")
     _require_file(args.pas_atlas, "--pas-atlas")
     _require_file(args.coverage_pos, "--coverage-pos")
@@ -214,7 +249,7 @@ def _run_full(args: argparse.Namespace) -> None:
         f_stat_threshold=args.f_stat_threshold,
         posterior_usage_weight=args.posterior_usage_weight,
         n_threads=args.threads,
-        debug=args.debug,
+        emit=args.emit,
     )
     paqr3.run_full(sample_name=args.sample_id)
 
@@ -251,7 +286,7 @@ def main() -> None:
         description=(
             "Parse a GTF annotation, extend terminal exons, merge PAS "
             "sites and build sub-segments.  Produces a segments TSV "
-            "(plus a debug BED when --debug is set)."
+            "(plus a debug BED when --emit debug is set)."
         ),
     )
     _add_common_args(p_seg)
