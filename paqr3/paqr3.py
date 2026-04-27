@@ -34,10 +34,10 @@ _EMIT_BW_MODES: frozenset[str] = frozenset(
 # Source keys: "raw" = raw_cov_df, "post" = posterior_df.
 _EMIT_BW_SPEC: dict[str, tuple[str, str]] = {
     "mean_cov": ("raw", "mean_cov"),
-    "rna_u":    ("post", "rna_usage"),
-    "obs_rpm":  ("post", "observed_rpm"),
+    "rna_u": ("post", "rna_usage"),
+    "obs_rpm": ("post", "observed_rpm"),
     "post_rpm": ("post", "posterior_rpm"),
-    "final":    ("post", "posterior_rel_usage"),
+    "final": ("post", "posterior_rel_usage"),
 }
 
 
@@ -77,9 +77,7 @@ def _load_chrom_sizes(path: str) -> dict[str, int]:
     return sizes
 
 
-def _write_tsv_gz(
-    df: pd.DataFrame, path: str, n_threads: int = 1
-) -> None:
+def _write_tsv_gz(df: pd.DataFrame, path: str, n_threads: int = 1) -> None:
     """Write *df* to a gzip-compressed TSV, using pigz when available."""
     csv_bytes = df.to_csv(sep="\t", index=False).encode()
     if shutil.which("pigz"):
@@ -115,9 +113,7 @@ def _write_bigwig(
     df = df[mask].sort_values(["chrom", "start"]).reset_index(drop=True)
 
     if df.empty:
-        logger.warning(
-            "No data for BigWig '%s' — file not written.", path
-        )
+        logger.warning("No data for BigWig '%s' — file not written.", path)
         return
 
     bw = pyBigWig.open(path, "w")
@@ -175,9 +171,7 @@ class PAQR3:
         return os.path.basename(self.coverage_bw_pos).split(".")[0]
 
     def _make_results_dir(self, sample_name: str) -> str:
-        results_dir = os.path.join(
-            self.output_dir, f"{sample_name}_results"
-        )
+        results_dir = os.path.join(self.output_dir, f"{sample_name}_results")
         os.makedirs(results_dir, exist_ok=True)
         return results_dir
 
@@ -197,7 +191,7 @@ class PAQR3:
             results_dir: Output directory for this sample.
             sname: Sample name prefix for file names.
             raw_cov_df: Raw per-subsegment coverage metrics (all
-                subsegments, including non-PAS).
+                subsegments, including non-PAS; no coordinate columns).
             posterior_df: Per-PAS posterior usage DataFrame.
             subsegments_df: Sub-segment coordinate table used to attach
                 ``chrom``/``start``/``end`` to PAS-only DataFrames.
@@ -216,15 +210,9 @@ class PAQR3:
         for mode in bw_modes:
             source_key, col = _EMIT_BW_SPEC[mode]
             out_path = os.path.join(results_dir, f"{sname}_{mode}.bw")
-
-            if source_key == "raw":
-                # raw_cov_df already has chrom, start, end
-                _write_bigwig(raw_cov_df, col, chrom_sizes, out_path)
-            else:
-                # posterior_df needs coord merge
-                merged = posterior_df.merge(coords, on="subsegment_id",
-                                            how="left")
-                _write_bigwig(merged, col, chrom_sizes, out_path)
+            source_df = raw_cov_df if source_key == "raw" else posterior_df
+            merged = source_df.merge(coords, on="subsegment_id", how="left")
+            _write_bigwig(merged, col, chrom_sizes, out_path)
 
     def run_segment(self, output_dir: str | None = None) -> str:
         """Run the segmentation stage and write the segments TSV.
@@ -324,12 +312,10 @@ class PAQR3:
         # Load the segments TSV; derive segment_id and gene_id from
         # the subsegment_id field ({gene_id}:{TypeNNN}:{sub:03d}).
         seg_df = pd.read_csv(segments_tsv, sep="\t")
-        seg_df["segment_id"] = seg_df["subsegment_id"].str.rsplit(
-            ":", n=1
-        ).str[0]
-        seg_df["gene_id"] = seg_df["subsegment_id"].str.split(
-            ":"
-        ).str[0]
+        seg_df["segment_id"] = (
+            seg_df["subsegment_id"].str.rsplit(":", n=1).str[0]
+        )
+        seg_df["gene_id"] = seg_df["subsegment_id"].str.split(":").str[0]
         subsegments_df = seg_df.rename(
             columns={"overlapping_pas_id": "pas_id"}
         )
@@ -362,8 +348,13 @@ class PAQR3:
         if segment_tsv is not None:
             segment_df = (
                 usage_df[
-                    ["gene_id", "segment_id", "rna_sum_drop_cov",
-                     "f_stat", "p_value"]
+                    [
+                        "gene_id",
+                        "segment_id",
+                        "rna_sum_drop_cov",
+                        "f_stat",
+                        "p_value",
+                    ]
                 ]
                 .drop_duplicates("segment_id")
                 .reset_index(drop=True)
@@ -383,8 +374,12 @@ class PAQR3:
         _write_tsv_gz(posterior_out, posterior_tsv, n_threads=self.n_threads)
 
         self._emit_bigwigs(
-            effective_emit, results_dir, sname,
-            raw_cov_df, posterior_df, subsegments_df,
+            effective_emit,
+            results_dir,
+            sname,
+            raw_cov_df,
+            posterior_df,
+            subsegments_df,
         )
 
         logger.info("Quantification complete.")
@@ -467,15 +462,18 @@ class PAQR3:
             .drop_duplicates("rep_cs")
             .set_index("rep_cs")["atlas_rpm"]
         )
-        usage_df["atlas_rpm"] = (
-            usage_df["pas_id"].map(atlas_map).fillna(0.0)
-        )
+        usage_df["atlas_rpm"] = usage_df["pas_id"].map(atlas_map).fillna(0.0)
 
         if segment_tsv is not None:
             segment_df = (
                 usage_df[
-                    ["gene_id", "segment_id", "rna_sum_drop_cov",
-                     "f_stat", "p_value"]
+                    [
+                        "gene_id",
+                        "segment_id",
+                        "rna_sum_drop_cov",
+                        "f_stat",
+                        "p_value",
+                    ]
                 ]
                 .drop_duplicates("segment_id")
                 .reset_index(drop=True)
@@ -495,8 +493,12 @@ class PAQR3:
         _write_tsv_gz(posterior_out, posterior_tsv, n_threads=self.n_threads)
 
         self._emit_bigwigs(
-            effective_emit, results_dir, sname,
-            raw_cov_df, posterior_df, subsegments_df,
+            effective_emit,
+            results_dir,
+            sname,
+            raw_cov_df,
+            posterior_df,
+            subsegments_df,
         )
 
         logger.info("PAQR3 pipeline completed.")
