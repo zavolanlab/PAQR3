@@ -1014,6 +1014,10 @@ class CalculateCoverages:
             debug=debug,
         )
 
+        # Return a slimmed raw-coverage table (no large coverage arrays)
+        # for callers that need per-subsegment mean coverage (e.g. BigWig
+        # writing).  Drop the array column before freeing the full frame.
+        raw_cov_slim = raw_cov_df.drop(columns=["coverage"], errors="ignore")
         del raw_cov_df
 
         # Step 3: per-segment expression stats (if BAM provided)
@@ -1027,4 +1031,4 @@ class CalculateCoverages:
         logger.info("PAS usage evaluation complete.")
         logger.info("Total runtime: %.2f seconds", end_time - start_time)
 
-        return refined_usage_df
+        return raw_cov_slim, refined_usage_df

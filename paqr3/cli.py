@@ -170,6 +170,16 @@ def _add_quant_args(p: argparse.ArgumentParser) -> None:
         default=1,
         help="Threads for BigWig reading and F-stat worker processes (default: 1).",
     )
+    p.add_argument(
+        "--chr-sizes",
+        "-cs",
+        default=None,
+        help=(
+            "Path to a two-column chromosome-sizes file (chrom TAB size). "
+            "Required when any BigWig emit mode is requested "
+            "(final, mean_cov, rna_u, obs_rpm, post_rpm, all, debug)."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -177,10 +187,29 @@ def _add_quant_args(p: argparse.ArgumentParser) -> None:
 # ---------------------------------------------------------------------------
 
 
+_BW_EMIT_TOKENS = frozenset(
+    {"final", "mean_cov", "rna_u", "obs_rpm", "post_rpm", "all", "debug"}
+)
+
+
 def _set_verbosity(args: argparse.Namespace) -> None:
     """Apply the --verbosity choice to the root logger."""
     level = logging.DEBUG if args.verbosity == "DEBUG" else logging.INFO
     logging.getLogger().setLevel(level)
+
+
+def _require_chr_sizes(args: argparse.Namespace) -> None:
+    """Exit with an error if BigWig modes are requested without --chr-sizes."""
+    emit = set(args.emit or [])
+    if emit & _BW_EMIT_TOKENS:
+        if not args.chr_sizes:
+            print(
+                "Error: --chr-sizes is required when BigWig emit modes "
+                f"are requested ({', '.join(sorted(emit & _BW_EMIT_TOKENS))}).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _require_file(args.chr_sizes, "--chr-sizes")
 
 
 def _run_segment(args: argparse.Namespace) -> None:
@@ -206,6 +235,7 @@ def _run_segment(args: argparse.Namespace) -> None:
 def _run_quant(args: argparse.Namespace) -> None:
     """Handle the ``quant`` sub-command."""
     _set_verbosity(args)
+    _require_chr_sizes(args)
     _require_file(args.segments_tsv, "--segments-tsv")
     _require_file(args.coverage_pos, "--coverage-pos")
     _require_file(args.coverage_neg, "--coverage-neg")
@@ -224,6 +254,7 @@ def _run_quant(args: argparse.Namespace) -> None:
         posterior_usage_weight=args.posterior_usage_weight,
         n_threads=args.threads,
         emit=args.emit,
+        chr_sizes_file=args.chr_sizes,
     )
     paqr3.run_quant(args.segments_tsv, sample_name=args.sample_id)
 
@@ -231,6 +262,7 @@ def _run_quant(args: argparse.Namespace) -> None:
 def _run_full(args: argparse.Namespace) -> None:
     """Handle the ``full`` sub-command."""
     _set_verbosity(args)
+    _require_chr_sizes(args)
     _require_file(args.annotation, "--annotation")
     _require_file(args.pas_atlas, "--pas-atlas")
     _require_file(args.coverage_pos, "--coverage-pos")
@@ -250,6 +282,7 @@ def _run_full(args: argparse.Namespace) -> None:
         posterior_usage_weight=args.posterior_usage_weight,
         n_threads=args.threads,
         emit=args.emit,
+        chr_sizes_file=args.chr_sizes,
     )
     paqr3.run_full(sample_name=args.sample_id)
 

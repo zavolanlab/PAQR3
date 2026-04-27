@@ -16,6 +16,7 @@ import shutil
 import subprocess
 
 import pandas as pd  # type: ignore
+import pyBigWig  # type: ignore
 
 from paqr3.construct_segments import ConstructSegments
 from paqr3.calculate_cov_metrics import CalculateCoverages
@@ -24,10 +25,20 @@ from paqr3.calculate_gene_level_usages import CalculateGeneLevelUsage
 
 logger = logging.getLogger(__name__)
 
-# Emit tokens that will produce BigWig output (not yet implemented).
+# Emit tokens that produce BigWig output.
 _EMIT_BW_MODES: frozenset[str] = frozenset(
     {"final", "mean_cov", "rna_u", "obs_rpm", "post_rpm"}
 )
+
+# Maps emit token → (source DataFrame key, column name).
+# Source keys: "raw" = raw_cov_df, "post" = posterior_df.
+_EMIT_BW_SPEC: dict[str, tuple[str, str]] = {
+    "mean_cov": ("raw", "mean_cov"),
+    "rna_u":    ("post", "rna_usage"),
+    "obs_rpm":  ("post", "observed_rpm"),
+    "post_rpm": ("post", "posterior_rpm"),
+    "final":    ("post", "posterior_rel_usage"),
+}
 
 
 def _resolve_emit(emit: list[str] | None) -> set[str]:
@@ -35,8 +46,8 @@ def _resolve_emit(emit: list[str] | None) -> set[str]:
 
     ``all``   expands to all BigWig modes.
     ``debug`` expands to all BigWig modes plus ``debug_json`` and
-              ``debug`` (the last flag is used to trigger debug BEDs in
-              segment mode).
+              ``debug`` (the last flag is also used to trigger debug
+              BEDs in segment mode).
     """
     if not emit:
         return set()
@@ -51,6 +62,19 @@ def _resolve_emit(emit: list[str] | None) -> set[str]:
         else:
             resolved.add(token)
     return resolved
+
+
+def _load_chrom_sizes(path: str) -> dict[str, int]:
+    """Parse a two-column chrom-sizes file into a {chrom: size} dict."""
+    sizes: dict[str, int] = {}
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            chrom, size = line.split("\t")[:2]
+            sizes[chrom] = int(size)
+    return sizes
 
 
 def _write_tsv_gz(
@@ -72,6 +96,46 @@ def _write_tsv_gz(
     logger.info("Written: %s", path)
 
 
+def _write_bigwig(
+    df: pd.DataFrame,
+    value_col: str,
+    chrom_sizes: dict[str, int],
+    path: str,
+) -> None:
+    """Write a BigWig file with one constant-value entry per subsegment.
+
+    Args:
+        df: DataFrame with columns ``chrom``, ``start``, ``end``, and
+            *value_col*.
+        value_col: Column in *df* to use as the BigWig signal value.
+        chrom_sizes: ``{chrom: size}`` dict used for the BigWig header.
+        path: Output file path.
+    """
+    mask = df[value_col].notna() & df["chrom"].isin(chrom_sizes)
+    df = df[mask].sort_values(["chrom", "start"]).reset_index(drop=True)
+
+    if df.empty:
+        logger.warning(
+            "No data for BigWig '%s' — file not written.", path
+        )
+        return
+
+    bw = pyBigWig.open(path, "w")
+    bw.addHeader(sorted(chrom_sizes.items()))
+
+    for chrom, grp in df.groupby("chrom", sort=True):
+        grp = grp.sort_values("start")
+        bw.addEntries(
+            chroms=[str(chrom)] * len(grp),
+            starts=grp["start"].astype(int).tolist(),
+            ends=grp["end"].astype(int).tolist(),
+            values=grp[value_col].astype(float).tolist(),
+        )
+
+    bw.close()
+    logger.info("Written: %s", path)
+
+
 class PAQR3:
     """Orchestrate the PAQR3 segmentation and quantification pipeline."""
 
@@ -90,6 +154,7 @@ class PAQR3:
         posterior_usage_weight: float = 0.1,
         n_threads: int = 1,
         emit: list[str] | None = None,
+        chr_sizes_file: str | None = None,
     ) -> None:
         self.annotation_file = annotation_file
         self.pas_atlas_file = pas_atlas_file
@@ -104,6 +169,7 @@ class PAQR3:
         self.posterior_usage_weight = posterior_usage_weight
         self.n_threads = n_threads
         self.emit = emit
+        self.chr_sizes_file = chr_sizes_file
 
     def _sample_name(self) -> str:
         return os.path.basename(self.coverage_bw_pos).split(".")[0]
@@ -115,13 +181,50 @@ class PAQR3:
         os.makedirs(results_dir, exist_ok=True)
         return results_dir
 
-    def _warn_bw_modes(self, effective_emit: set[str]) -> None:
-        bw_requested = effective_emit & _EMIT_BW_MODES
-        if bw_requested:
-            logger.warning(
-                "BigWig output not yet implemented for: %s — skipping.",
-                ", ".join(sorted(bw_requested)),
-            )
+    def _emit_bigwigs(
+        self,
+        effective_emit: set[str],
+        results_dir: str,
+        sname: str,
+        raw_cov_df: pd.DataFrame,
+        posterior_df: pd.DataFrame,
+        subsegments_df: pd.DataFrame,
+    ) -> None:
+        """Write BigWig files for all requested emit modes.
+
+        Args:
+            effective_emit: Resolved set of emit tokens.
+            results_dir: Output directory for this sample.
+            sname: Sample name prefix for file names.
+            raw_cov_df: Raw per-subsegment coverage metrics (all
+                subsegments, including non-PAS).
+            posterior_df: Per-PAS posterior usage DataFrame.
+            subsegments_df: Sub-segment coordinate table used to attach
+                ``chrom``/``start``/``end`` to PAS-only DataFrames.
+        """
+        bw_modes = effective_emit & _EMIT_BW_MODES
+        if not bw_modes:
+            return
+
+        assert self.chr_sizes_file is not None
+        chrom_sizes = _load_chrom_sizes(self.chr_sizes_file)
+
+        coords = subsegments_df[
+            ["subsegment_id", "chrom", "start", "end"]
+        ].drop_duplicates("subsegment_id")
+
+        for mode in bw_modes:
+            source_key, col = _EMIT_BW_SPEC[mode]
+            out_path = os.path.join(results_dir, f"{sname}_{mode}.bw")
+
+            if source_key == "raw":
+                # raw_cov_df already has chrom, start, end
+                _write_bigwig(raw_cov_df, col, chrom_sizes, out_path)
+            else:
+                # posterior_df needs coord merge
+                merged = posterior_df.merge(coords, on="subsegment_id",
+                                            how="left")
+                _write_bigwig(merged, col, chrom_sizes, out_path)
 
     def run_segment(self, output_dir: str | None = None) -> str:
         """Run the segmentation stage and write the segments TSV.
@@ -172,11 +275,15 @@ class PAQR3:
         Always writes ``{sname}_posterior_usage.tsv.gz``.  Additional
         outputs are controlled by ``self.emit``:
 
-        - ``segment`` — ``{sname}_segment.tsv.gz`` with segment-level
-          F-stat and coverage metrics.
-        - ``debug``   — ``{sname}_debug.json`` with per-pattern detail.
-        - BigWig modes (``final``, ``mean_cov``, ``rna_u``,
-          ``obs_rpm``, ``post_rpm``, ``all``) — not yet implemented.
+        - ``segment``  — ``{sname}_segment.tsv.gz``.
+        - ``debug``    — ``{sname}_debug.json``.
+        - ``mean_cov`` — ``{sname}_mean_cov.bw`` (mean BigWig coverage
+          per subsegment, all subsegments including non-PAS).
+        - ``rna_u``    — ``{sname}_rna_u.bw`` (F-stat usage fraction).
+        - ``obs_rpm``  — ``{sname}_obs_rpm.bw``.
+        - ``post_rpm`` — ``{sname}_post_rpm.bw``.
+        - ``final``    — ``{sname}_final.bw`` (posterior relative usage).
+        - ``all``      — all BigWig modes above.
 
         Args:
             segments_tsv: Path to the segments TSV from the
@@ -199,7 +306,6 @@ class PAQR3:
         os.makedirs(results_dir, exist_ok=True)
 
         effective_emit = _resolve_emit(self.emit)
-        self._warn_bw_modes(effective_emit)
 
         posterior_tsv = os.path.join(
             results_dir, f"{sname}_posterior_usage.tsv.gz"
@@ -234,7 +340,7 @@ class PAQR3:
             bam_file=self.bam_file,
             f_stat_threshold=self.f_stat_threshold,
         )
-        usage_df = cc.run(
+        raw_cov_df, usage_df = cc.run(
             subsegments_df,
             output_debug_json=debug_json,
             n_threads=self.n_threads,
@@ -275,6 +381,12 @@ class PAQR3:
             gene_usage_df, on="gene_id", how="left"
         ).drop(columns=["gene_id", "segment_id"])
         _write_tsv_gz(posterior_out, posterior_tsv, n_threads=self.n_threads)
+
+        self._emit_bigwigs(
+            effective_emit, results_dir, sname,
+            raw_cov_df, posterior_df, subsegments_df,
+        )
+
         logger.info("Quantification complete.")
 
     def run_full(self, sample_name: str | None = None) -> None:
@@ -296,7 +408,6 @@ class PAQR3:
         results_dir = self._make_results_dir(sname)
 
         effective_emit = _resolve_emit(self.emit)
-        self._warn_bw_modes(effective_emit)
 
         segments_tsv = os.path.join(results_dir, f"{sname}_segments.tsv")
         debug_bed = (
@@ -341,7 +452,7 @@ class PAQR3:
             bam_file=self.bam_file,
             f_stat_threshold=self.f_stat_threshold,
         )
-        usage_df = cc.run(
+        raw_cov_df, usage_df = cc.run(
             subsegments_df,
             output_debug_json=debug_json,
             n_threads=self.n_threads,
@@ -382,4 +493,10 @@ class PAQR3:
             gene_usage_df, on="gene_id", how="left"
         ).drop(columns=["gene_id", "segment_id"])
         _write_tsv_gz(posterior_out, posterior_tsv, n_threads=self.n_threads)
+
+        self._emit_bigwigs(
+            effective_emit, results_dir, sname,
+            raw_cov_df, posterior_df, subsegments_df,
+        )
+
         logger.info("PAQR3 pipeline completed.")
