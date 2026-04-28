@@ -608,6 +608,7 @@ class ConstructSegments:
         rep_start: int | None = None
         rep_end: int | None = None
         rep_rpm: float | None = None
+        rep_name: str | None = None
 
         for pas in pas_sorted:
             chrom = pas.chrom
@@ -628,6 +629,10 @@ class ConstructSegments:
                     _PAS_RPM_COL + 1,
                 )
                 rpm = 0.0
+            try:
+                name: str | None = pas.fields[3] or None
+            except IndexError:
+                name = None
 
             if current_start is None:
                 current_chrom = chrom
@@ -635,7 +640,7 @@ class ConstructSegments:
                 current_start = start
                 current_end = end
                 rpm_values = [rpm]
-                rep_start, rep_end, rep_rpm = start, end, rpm
+                rep_start, rep_end, rep_rpm, rep_name = start, end, rpm, name
             elif (
                 current_end is not None
                 and chrom == current_chrom
@@ -645,7 +650,9 @@ class ConstructSegments:
                 current_end = max(current_end, end)
                 rpm_values.append(rpm)
                 if rep_rpm is None or rpm > rep_rpm:
-                    rep_start, rep_end, rep_rpm = start, end, rpm
+                    rep_start, rep_end, rep_rpm, rep_name = (
+                        start, end, rpm, name
+                    )
             else:
                 assert current_chrom is not None
                 assert current_strand is not None
@@ -654,12 +661,15 @@ class ConstructSegments:
                 assert rep_start is not None
                 assert rep_end is not None
                 mean_rpm = sum(rpm_values) / len(rpm_values)
-                rep_pos = (
-                    rep_start
-                    if rep_end == rep_start
-                    else (rep_start + rep_end) // 2
-                )
-                rep_cs = f"{current_chrom}:{rep_pos}:{current_strand}"
+                if rep_name and rep_name != ".":
+                    rep_cs = rep_name
+                else:
+                    rep_pos = (
+                        rep_start
+                        if rep_end == rep_start
+                        else (rep_start + rep_end) // 2
+                    )
+                    rep_cs = f"{current_chrom}:{rep_pos}:{current_strand}"
                 merged_sites.append(
                     (
                         current_chrom,
@@ -675,7 +685,7 @@ class ConstructSegments:
                 current_start = start
                 current_end = end
                 rpm_values = [rpm]
-                rep_start, rep_end, rep_rpm = start, end, rpm
+                rep_start, rep_end, rep_rpm, rep_name = start, end, rpm, name
 
         if current_start is not None:
             assert current_chrom is not None
@@ -684,12 +694,15 @@ class ConstructSegments:
             assert rep_start is not None
             assert rep_end is not None
             mean_rpm = sum(rpm_values) / len(rpm_values)
-            rep_pos = (
-                rep_start
-                if rep_end == rep_start
-                else (rep_start + rep_end) // 2
-            )
-            rep_cs = f"{current_chrom}:{rep_pos}:{current_strand}"
+            if rep_name and rep_name != ".":
+                rep_cs = rep_name
+            else:
+                rep_pos = (
+                    rep_start
+                    if rep_end == rep_start
+                    else (rep_start + rep_end) // 2
+                )
+                rep_cs = f"{current_chrom}:{rep_pos}:{current_strand}"
             merged_sites.append(
                 (
                     current_chrom,
@@ -903,6 +916,8 @@ class ConstructSegments:
           sub-segment.
         - ``atlas_rpm``: mean RPM of the merged PAS cluster; ``0.0``
           for trailing sub-segments.
+        - ``pas_start``, ``pas_end``: 0-based half-open coordinates of
+          the merged PAS cluster; ``NaN`` for trailing sub-segments.
 
         If *out_debug_bed* is given, a headerless six-column BED file
         is written listing every gene, segment, sub-segment and PAS
@@ -919,15 +934,19 @@ class ConstructSegments:
             "create_segments_tsv()"
         )
 
-        # Build lookups: integer pas_id → rep_cs and → atlas_rpm.
+        # Build lookups: integer pas_id → rep_cs, atlas_rpm, cluster coords.
         id_to_rep: dict[int, str] = {}
         id_to_rpm: dict[int, float] = {}
+        id_to_pas_start: dict[int, int] = {}
+        id_to_pas_end: dict[int, int] = {}
         # Also: rep_cs → (chrom, start, end, strand) for debug BED.
         rep_to_coords: dict[str, tuple[str, int, int, str]] = {}
         for row in self.pas_df.itertuples(index=False):
             pid = int(row.pas_id)
             id_to_rep[pid] = row.rep_cs
             id_to_rpm[pid] = float(row.atlas_rpm)
+            id_to_pas_start[pid] = int(row.start)
+            id_to_pas_end[pid] = int(row.end)
             rep_to_coords[row.rep_cs] = (
                 row.chrom, int(row.start), int(row.end), row.strand
             )
@@ -990,6 +1009,14 @@ class ConstructSegments:
                         rep_cs = "."
                         rpm = 0.0
 
+                    if int_pid is not None and int_pid != ".":
+                        pas_start: int | None = id_to_pas_start.get(
+                            int(int_pid)
+                        )
+                        pas_end: int | None = id_to_pas_end.get(int(int_pid))
+                    else:
+                        pas_start = None
+                        pas_end = None
                     tsv_rows.append({
                         "chrom": sub.chrom,
                         "start": sub.start,
@@ -998,6 +1025,8 @@ class ConstructSegments:
                         "strand": sub.strand,
                         "overlapping_pas_id": rep_cs,
                         "atlas_rpm": rpm,
+                        "pas_start": pas_start,
+                        "pas_end": pas_end,
                     })
 
                     if out_debug_bed:
@@ -1028,6 +1057,7 @@ class ConstructSegments:
             columns=[
                 "chrom", "start", "end", "subsegment_id",
                 "strand", "overlapping_pas_id", "atlas_rpm",
+                "pas_start", "pas_end",
             ],
         )
         tsv_df.to_csv(out_tsv, sep="\t", index=False)

@@ -68,15 +68,6 @@ def _resolve_emit(emit: list[str] | None) -> set[str]:
     return resolved
 
 
-def _with_pas_coords(df: pd.DataFrame) -> pd.DataFrame:
-    """Add ``chrom``/``start``/``end`` columns from ``pas_id`` 'chrom:pos'."""
-    split = df["pas_id"].str.split(":", expand=True)
-    out = df.copy()
-    out["chrom"] = split[0]
-    out["start"] = split[1].astype(int)
-    out["end"] = out["start"] + 1
-    return out
-
 
 def _load_chrom_sizes(path: str) -> dict[str, int]:
     """Parse a two-column chrom-sizes file into a {chrom: size} dict."""
@@ -197,6 +188,7 @@ class PAQR3:
         raw_cov_df: pd.DataFrame,
         posterior_df: pd.DataFrame,
         subsegments_df: pd.DataFrame,
+        pas_coords: pd.DataFrame | None = None,
     ) -> None:
         """Write BigWig files for all requested emit modes.
 
@@ -208,7 +200,11 @@ class PAQR3:
                 subsegments, including non-PAS; no coordinate columns).
             posterior_df: Per-PAS posterior usage DataFrame.
             subsegments_df: Sub-segment coordinate table used to attach
-                ``chrom``/``start``/``end`` to PAS-only DataFrames.
+                ``chrom``/``start``/``end`` to subsegment DataFrames.
+            pas_coords: Optional DataFrame with columns ``pas_id``,
+                ``chrom``, ``start``, ``end`` giving merged PAS cluster
+                coordinates.  Required for ``rna_u`` and ``final`` BW
+                modes; if absent those modes emit single-base intervals.
         """
         bw_modes = effective_emit & _EMIT_BW_MODES
         if not bw_modes:
@@ -225,8 +221,12 @@ class PAQR3:
             source_key, col, coord_type = _EMIT_BW_SPEC[mode]
             out_path = os.path.join(results_dir, f"{sname}_{mode}.bw")
             source_df = raw_cov_df if source_key == "raw" else posterior_df
-            if coord_type == "pas":
-                df_with_coords = _with_pas_coords(source_df)
+            if coord_type == "pas" and pas_coords is not None:
+                df_with_coords = source_df.merge(
+                    pas_coords[["pas_id", "chrom", "start", "end"]],
+                    on="pas_id",
+                    how="left",
+                )
             else:
                 df_with_coords = source_df.merge(
                     coords, on="subsegment_id", how="left"
@@ -392,6 +392,22 @@ class PAQR3:
         ).drop(columns=["gene_id", "segment_id"])
         _write_tsv_gz(posterior_out, posterior_tsv, n_threads=self.n_threads)
 
+        if "pas_start" in seg_df.columns:
+            _pc = (
+                seg_df[
+                    ["chrom", "overlapping_pas_id", "pas_start", "pas_end"]
+                ]
+                .query("overlapping_pas_id != '.'")
+                .drop_duplicates("overlapping_pas_id")
+                .rename(columns={
+                    "overlapping_pas_id": "pas_id",
+                    "pas_start": "start",
+                    "pas_end": "end",
+                })
+            )
+            pas_coords: pd.DataFrame | None = _pc
+        else:
+            pas_coords = None
         self._emit_bigwigs(
             effective_emit,
             results_dir,
@@ -399,6 +415,7 @@ class PAQR3:
             raw_cov_df,
             posterior_df,
             subsegments_df,
+            pas_coords=pas_coords,
         )
 
         logger.info("Quantification complete.")
@@ -511,6 +528,11 @@ class PAQR3:
         ).drop(columns=["gene_id", "segment_id"])
         _write_tsv_gz(posterior_out, posterior_tsv, n_threads=self.n_threads)
 
+        pas_coords = (
+            cs.pas_df[["rep_cs", "chrom", "start", "end"]]
+            .rename(columns={"rep_cs": "pas_id"})
+            .drop_duplicates("pas_id")
+        )
         self._emit_bigwigs(
             effective_emit,
             results_dir,
@@ -518,6 +540,7 @@ class PAQR3:
             raw_cov_df,
             posterior_df,
             subsegments_df,
+            pas_coords=pas_coords,
         )
 
         logger.info("PAQR3 pipeline completed.")
