@@ -30,24 +30,26 @@ _EMIT_BW_MODES: frozenset[str] = frozenset(
     {"final", "mean_cov", "rna_u", "obs_rpm", "post_rpm"}
 )
 
-# Maps emit token → (source DataFrame key, column name).
-# Source keys: "raw" = raw_cov_df, "post" = posterior_df.
-_EMIT_BW_SPEC: dict[str, tuple[str, str]] = {
-    "mean_cov": ("raw", "mean_cov"),
-    "rna_u": ("post", "rna_usage"),
-    "obs_rpm": ("post", "observed_rpm"),
-    "post_rpm": ("post", "posterior_rpm"),
-    "final": ("post", "posterior_rel_usage"),
+# Maps emit token → (source DataFrame key, column name, coord type).
+# Source keys:  "raw"  = raw_cov_df,   "post" = posterior_df.
+# Coord types:  "subseg" = merge subsegment intervals from subsegments_df;
+#               "pas"    = derive single-base interval from pas_id 'chrom:pos'.
+_EMIT_BW_SPEC: dict[str, tuple[str, str, str]] = {
+    "mean_cov": ("raw",  "mean_cov",           "subseg"),
+    "rna_u":    ("post", "rna_usage",           "pas"),
+    "obs_rpm":  ("post", "observed_rpm",        "subseg"),
+    "post_rpm": ("post", "posterior_rpm",       "subseg"),
+    "final":    ("post", "posterior_rel_usage", "pas"),
 }
 
 
 def _resolve_emit(emit: list[str] | None) -> set[str]:
     """Expand shortcut emit tokens into the full set of requested outputs.
 
-    ``all``   expands to all BigWig modes.
-    ``debug`` expands to all BigWig modes plus ``debug_json`` and
-              ``debug`` (the last flag is also used to trigger debug
-              BEDs in segment mode).
+    ``all``   expands to all BigWig modes plus ``segment_info``.
+    ``debug`` expands to all BigWig modes plus ``segment_info``,
+              ``debug_json``, and ``debug`` (the last flag is also used
+              to trigger debug BEDs in segment mode).
     """
     if not emit:
         return set()
@@ -55,13 +57,25 @@ def _resolve_emit(emit: list[str] | None) -> set[str]:
     for token in emit:
         if token == "all":
             resolved |= _EMIT_BW_MODES
+            resolved.add("segment_info")
         elif token == "debug":
             resolved |= _EMIT_BW_MODES
+            resolved.add("segment_info")
             resolved.add("debug_json")
             resolved.add("debug")
         else:
             resolved.add(token)
     return resolved
+
+
+def _with_pas_coords(df: pd.DataFrame) -> pd.DataFrame:
+    """Add ``chrom``/``start``/``end`` columns from ``pas_id`` 'chrom:pos'."""
+    split = df["pas_id"].str.split(":", expand=True)
+    out = df.copy()
+    out["chrom"] = split[0]
+    out["start"] = split[1].astype(int)
+    out["end"] = out["start"] + 1
+    return out
 
 
 def _load_chrom_sizes(path: str) -> dict[str, int]:
@@ -208,11 +222,16 @@ class PAQR3:
         ].drop_duplicates("subsegment_id")
 
         for mode in bw_modes:
-            source_key, col = _EMIT_BW_SPEC[mode]
+            source_key, col, coord_type = _EMIT_BW_SPEC[mode]
             out_path = os.path.join(results_dir, f"{sname}_{mode}.bw")
             source_df = raw_cov_df if source_key == "raw" else posterior_df
-            merged = source_df.merge(coords, on="subsegment_id", how="left")
-            _write_bigwig(merged, col, chrom_sizes, out_path)
+            if coord_type == "pas":
+                df_with_coords = _with_pas_coords(source_df)
+            else:
+                df_with_coords = source_df.merge(
+                    coords, on="subsegment_id", how="left"
+                )
+            _write_bigwig(df_with_coords, col, chrom_sizes, out_path)
 
     def run_segment(self, output_dir: str | None = None) -> str:
         """Run the segmentation stage and write the segments TSV.
@@ -304,8 +323,8 @@ class PAQR3:
             else None
         )
         segment_tsv = (
-            os.path.join(results_dir, f"{sname}_segment.tsv.gz")
-            if "segment" in effective_emit
+            os.path.join(results_dir, f"{sname}_segment_info.tsv.gz")
+            if "segment_info" in effective_emit
             else None
         )
 
@@ -436,8 +455,8 @@ class PAQR3:
             else None
         )
         segment_tsv = (
-            os.path.join(results_dir, f"{sname}_segment.tsv.gz")
-            if "segment" in effective_emit
+            os.path.join(results_dir, f"{sname}_segment_info.tsv.gz")
+            if "segment_info" in effective_emit
             else None
         )
 

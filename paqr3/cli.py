@@ -47,7 +47,7 @@ def _require_file(path: str, flag: str) -> None:
 
 _EMIT_CHOICES = [
     "final", "mean_cov", "rna_u", "obs_rpm", "post_rpm",
-    "all", "debug", "segment",
+    "all", "debug", "segment_info",
 ]
 
 
@@ -293,6 +293,7 @@ def _run_full(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    """Entry point for the ``paqr3`` CLI."""
     parser = argparse.ArgumentParser(
         prog="paqr3",
         description=(
