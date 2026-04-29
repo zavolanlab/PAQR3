@@ -892,9 +892,9 @@ class ConstructSegments:
     def create_segments_tsv(
         self,
         out_tsv: str,
-        out_debug_bed: str | None = None,
+        out_debug_prefix: str | None = None,
     ) -> None:
-        """Write the segments TSV (and optionally a debug BED).
+        """Write the segments TSV (and optionally four debug BED files).
 
         The TSV is the primary output of the segmentation stage and
         the required input for ``paqr3 quant``.  It contains one row
@@ -919,15 +919,21 @@ class ConstructSegments:
         - ``pas_start``, ``pas_end``: 0-based half-open coordinates of
           the merged PAS cluster; ``NaN`` for trailing sub-segments.
 
-        If *out_debug_bed* is given, a headerless six-column BED file
-        is written listing every gene, segment, sub-segment and PAS
-        with their genomic coordinates and a ``type`` label
-        (``gene`` / ``segment`` / ``subsegment`` / ``pas``).  PAS
+        If *out_debug_prefix* is given, four headerless five-column BED
+        files are written (one per category):
+
+        - ``{prefix}_genes.bed``
+        - ``{prefix}_segments.bed``
+        - ``{prefix}_subsegments.bed``
+        - ``{prefix}_pas.bed``
+
+        Each file has columns: chrom, start, end, id, strand.  PAS
         entries appear at most once per unique representative CS.
 
         Args:
             out_tsv: Output path for the segments TSV file.
-            out_debug_bed: Optional path for the debug BED file.
+            out_debug_prefix: Optional path prefix for the debug BED
+                files (no extension; category suffix is appended).
         """
         assert self.pas_df is not None, (
             "process_pas_atlas() must be called before "
@@ -971,7 +977,7 @@ class ConstructSegments:
                 else (0, 0)
             )
 
-            if out_debug_bed:
+            if out_debug_prefix:
                 debug_rows.append({
                     "chrom": g_chrom, "start": g_start,
                     "end": g_end, "id": gene.gene_id,
@@ -985,7 +991,7 @@ class ConstructSegments:
                     f"{gene.gene_id}:E001",
                 )
 
-                if out_debug_bed:
+                if out_debug_prefix:
                     debug_rows.append({
                         "chrom": segment.chrom,
                         "start": segment.start,
@@ -1029,7 +1035,7 @@ class ConstructSegments:
                         "pas_end": pas_end,
                     })
 
-                    if out_debug_bed:
+                    if out_debug_prefix:
                         debug_rows.append({
                             "chrom": sub.chrom,
                             "start": sub.start,
@@ -1066,15 +1072,24 @@ class ConstructSegments:
             out_tsv, len(tsv_df),
         )
 
-        if out_debug_bed and debug_rows:
+        if out_debug_prefix and debug_rows:
             debug_df = pd.DataFrame(
                 debug_rows,
                 columns=["chrom", "start", "end", "id", "type", "strand"],
             )
-            debug_df.to_csv(
-                out_debug_bed, sep="\t", index=False, header=False
-            )
-            logger.info("Debug BED written to %s", out_debug_bed)
+            for cat, suffix in (
+                ("gene", "genes"),
+                ("segment", "segments"),
+                ("subsegment", "subsegments"),
+                ("pas", "pas"),
+            ):
+                sub_df = (
+                    debug_df[debug_df["type"] == cat]
+                    .drop(columns=["type"])
+                )
+                path = f"{out_debug_prefix}_{suffix}.bed"
+                sub_df.to_csv(path, sep="\t", index=False, header=False)
+                logger.info("Debug BED written to %s", path)
 
     def write_segments_pas_to_bed(
         self,
@@ -1319,7 +1334,7 @@ class ConstructSegments:
         self,
         out_tsv: str,
         merge_distance: int = 5,
-        out_debug_bed: str | None = None,
+        out_debug_prefix: str | None = None,
     ) -> None:
         """Run the full segmentation pipeline and write output files.
 
@@ -1330,8 +1345,8 @@ class ConstructSegments:
             out_tsv: Output path for the segments TSV.
             merge_distance: Maximum gap (in bp) for merging adjacent
                 PAS sites in the atlas.
-            out_debug_bed: Optional path for the debug BED file
-                (written only when provided).
+            out_debug_prefix: Optional path prefix for the four debug
+                BED files (written only when provided).
         """
         self.compute(merge_distance)
-        self.create_segments_tsv(out_tsv, out_debug_bed=out_debug_bed)
+        self.create_segments_tsv(out_tsv, out_debug_prefix=out_debug_prefix)

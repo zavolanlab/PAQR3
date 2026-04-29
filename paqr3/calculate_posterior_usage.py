@@ -78,4 +78,9 @@ class CalculatePosteriorUsage:
             "posterior_rpm"
         ].transform(lambda x: x / x.sum() if x.sum() > 0 else 0.0)
 
+        # 4) Atlas relative usage per segment.
+        df["atlas_rel_usage"] = df.groupby("segment_id")[
+            "atlas_rpm"
+        ].transform(lambda x: x / x.sum() if x.sum() > 0 else 0.0)
+
         return df
