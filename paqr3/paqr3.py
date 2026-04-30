@@ -9,8 +9,11 @@ Exposes three run modes:
 - :meth:`PAQR3.run_full`: runs both stages end-to-end.
 """
 
+import gzip
 import logging
 import os
+import shutil
+import subprocess
 
 import pandas as pd  # type: ignore
 
@@ -20,6 +23,53 @@ from paqr3.calculate_posterior_usage import CalculatePosteriorUsage
 from paqr3.calculate_gene_level_usages import CalculateGeneLevelUsage
 
 logger = logging.getLogger(__name__)
+
+# Emit tokens that will produce BigWig output (not yet implemented).
+_EMIT_BW_MODES: frozenset[str] = frozenset(
+    {"final", "mean_cov", "rna_u", "obs_rpm", "post_rpm"}
+)
+
+
+def _resolve_emit(emit: list[str] | None) -> set[str]:
+    """Expand shortcut emit tokens into the full set of requested outputs.
+
+    ``all``   expands to all BigWig modes.
+    ``debug`` expands to all BigWig modes plus ``debug_json`` and
+              ``debug`` (the last flag is used to trigger debug BEDs in
+              segment mode).
+    """
+    if not emit:
+        return set()
+    resolved: set[str] = set()
+    for token in emit:
+        if token == "all":
+            resolved |= _EMIT_BW_MODES
+        elif token == "debug":
+            resolved |= _EMIT_BW_MODES
+            resolved.add("debug_json")
+            resolved.add("debug")
+        else:
+            resolved.add(token)
+    return resolved
+
+
+def _write_tsv_gz(
+    df: pd.DataFrame, path: str, n_threads: int = 1
+) -> None:
+    """Write *df* to a gzip-compressed TSV, using pigz when available."""
+    csv_bytes = df.to_csv(sep="\t", index=False).encode()
+    if shutil.which("pigz"):
+        with open(path, "wb") as fh:
+            subprocess.run(
+                ["pigz", "-p", str(n_threads), "-c"],
+                input=csv_bytes,
+                stdout=fh,
+                check=True,
+            )
+    else:
+        with gzip.open(path, "wb") as fh:
+            fh.write(csv_bytes)
+    logger.info("Written: %s", path)
 
 
 class PAQR3:
@@ -39,7 +89,7 @@ class PAQR3:
         f_stat_threshold: int = 100,
         posterior_usage_weight: float = 0.1,
         n_threads: int = 1,
-        debug: bool = False,
+        emit: list[str] | None = None,
     ) -> None:
         self.annotation_file = annotation_file
         self.pas_atlas_file = pas_atlas_file
@@ -53,7 +103,7 @@ class PAQR3:
         self.f_stat_threshold = f_stat_threshold
         self.posterior_usage_weight = posterior_usage_weight
         self.n_threads = n_threads
-        self.debug = debug
+        self.emit = emit
 
     def _sample_name(self) -> str:
         return os.path.basename(self.coverage_bw_pos).split(".")[0]
@@ -65,14 +115,23 @@ class PAQR3:
         os.makedirs(results_dir, exist_ok=True)
         return results_dir
 
+    def _warn_bw_modes(self, effective_emit: set[str]) -> None:
+        bw_requested = effective_emit & _EMIT_BW_MODES
+        if bw_requested:
+            logger.warning(
+                "BigWig output not yet implemented for: %s — skipping.",
+                ", ".join(sorted(bw_requested)),
+            )
+
     def run_segment(self, output_dir: str | None = None) -> str:
         """Run the segmentation stage and write the segments TSV.
 
         Produces:
 
-        - ``{sample}_segments.tsv`` — primary output; input for
+        - ``output_segments.tsv`` — primary output; input for
           :meth:`run_quant`.
-        - ``{sample}_debug.bed`` — debug BED (only when debug=True).
+        - ``output_segments_debug.bed`` — debug BED (only when
+          ``debug`` is in ``emit``).
 
         Args:
             output_dir: Override the instance output directory.
@@ -83,9 +142,10 @@ class PAQR3:
         out_dir = output_dir or self.output_dir
         os.makedirs(out_dir, exist_ok=True)
         segments_tsv = os.path.join(out_dir, "output_segments.tsv")
+        effective_emit = _resolve_emit(self.emit)
         debug_bed = (
             os.path.join(out_dir, "output_segments_debug.bed")
-            if self.debug
+            if "debug" in effective_emit
             else None
         )
         cs = ConstructSegments(
@@ -109,6 +169,15 @@ class PAQR3:
     ) -> None:
         """Run the quantification stage from a segments TSV.
 
+        Always writes ``{sname}_posterior_usage.tsv.gz``.  Additional
+        outputs are controlled by ``self.emit``:
+
+        - ``segment`` — ``{sname}_segment.tsv.gz`` with segment-level
+          F-stat and coverage metrics.
+        - ``debug``   — ``{sname}_debug.json`` with per-pattern detail.
+        - BigWig modes (``final``, ``mean_cov``, ``rna_u``,
+          ``obs_rpm``, ``post_rpm``, ``all``) — not yet implemented.
+
         Args:
             segments_tsv: Path to the segments TSV from the
                 segmentation stage.
@@ -126,17 +195,25 @@ class PAQR3:
                     "Coverage files must share the same sample name."
                 )
             sname = pos_stem
-        results_dir = (
-            output_dir or self._make_results_dir(sname)
-        )
+        results_dir = output_dir or self._make_results_dir(sname)
         os.makedirs(results_dir, exist_ok=True)
 
-        usage_tsv = os.path.join(results_dir, f"{sname}_usage.tsv")
+        effective_emit = _resolve_emit(self.emit)
+        self._warn_bw_modes(effective_emit)
+
         posterior_tsv = os.path.join(
-            results_dir, f"{sname}_posterior_usage.tsv"
+            results_dir, f"{sname}_posterior_usage.tsv.gz"
         )
-        coverage_tsv = os.path.join(results_dir, f"{sname}_coverage.tsv")
-        debug_json = os.path.join(results_dir, f"{sname}_debug.json")
+        debug_json = (
+            os.path.join(results_dir, f"{sname}_debug.json")
+            if "debug_json" in effective_emit
+            else None
+        )
+        segment_tsv = (
+            os.path.join(results_dir, f"{sname}_segment.tsv.gz")
+            if "segment" in effective_emit
+            else None
+        )
 
         # Load the segments TSV; derive segment_id and gene_id from
         # the subsegment_id field ({gene_id}:{TypeNNN}:{sub:03d}).
@@ -159,13 +236,11 @@ class PAQR3:
         )
         usage_df = cc.run(
             subsegments_df,
-            output_raw_tsv=coverage_tsv if self.debug else None,
-            output_final_tsv=usage_tsv if self.debug else None,
-            output_debug_json=debug_json if self.debug else None,
+            output_debug_json=debug_json,
             n_threads=self.n_threads,
             max_pas_count=self.max_pas_count,
             f_stat_threshold=self.f_stat_threshold,
-            debug=self.debug,
+            debug=logger.isEnabledFor(logging.DEBUG),
         )
 
         # Map atlas_rpm via subsegment_id.
@@ -178,6 +253,17 @@ class PAQR3:
             usage_df["subsegment_id"].map(atlas_map).fillna(0.0)
         )
 
+        if segment_tsv is not None:
+            segment_df = (
+                usage_df[
+                    ["gene_id", "segment_id", "rna_sum_drop_cov",
+                     "f_stat", "p_value"]
+                ]
+                .drop_duplicates("segment_id")
+                .reset_index(drop=True)
+            )
+            _write_tsv_gz(segment_df, segment_tsv, n_threads=self.n_threads)
+
         cpu = CalculatePosteriorUsage(weight=self.posterior_usage_weight)
         posterior_df = cpu.compute(usage_df)
 
@@ -188,8 +274,7 @@ class PAQR3:
         posterior_out = posterior_df.merge(
             gene_usage_df, on="gene_id", how="left"
         ).drop(columns=["gene_id", "segment_id"])
-        posterior_out.to_csv(posterior_tsv, sep="\t", index=False)
-        logger.info("Posterior usage written to %s", posterior_tsv)
+        _write_tsv_gz(posterior_out, posterior_tsv, n_threads=self.n_threads)
         logger.info("Quantification complete.")
 
     def run_full(self, sample_name: str | None = None) -> None:
@@ -210,10 +295,13 @@ class PAQR3:
                 )
         results_dir = self._make_results_dir(sname)
 
+        effective_emit = _resolve_emit(self.emit)
+        self._warn_bw_modes(effective_emit)
+
         segments_tsv = os.path.join(results_dir, f"{sname}_segments.tsv")
         debug_bed = (
             os.path.join(results_dir, f"{sname}_debug.bed")
-            if self.debug
+            if "debug" in effective_emit
             else None
         )
 
@@ -233,12 +321,19 @@ class PAQR3:
         # Stage 2: use in-memory DataFrame (avoids re-reading the TSV).
         subsegments_df = cs.create_subsegments_dataframe()
 
-        usage_tsv = os.path.join(results_dir, f"{sname}_usage.tsv")
         posterior_tsv = os.path.join(
-            results_dir, f"{sname}_posterior_usage.tsv"
+            results_dir, f"{sname}_posterior_usage.tsv.gz"
         )
-        coverage_tsv = os.path.join(results_dir, f"{sname}_coverage.tsv")
-        debug_json = os.path.join(results_dir, f"{sname}_debug.json")
+        debug_json = (
+            os.path.join(results_dir, f"{sname}_debug.json")
+            if "debug_json" in effective_emit
+            else None
+        )
+        segment_tsv = (
+            os.path.join(results_dir, f"{sname}_segment.tsv.gz")
+            if "segment" in effective_emit
+            else None
+        )
 
         cc = CalculateCoverages(
             self.coverage_bw_pos,
@@ -248,13 +343,11 @@ class PAQR3:
         )
         usage_df = cc.run(
             subsegments_df,
-            output_raw_tsv=coverage_tsv if self.debug else None,
-            output_final_tsv=usage_tsv if self.debug else None,
-            output_debug_json=debug_json if self.debug else None,
+            output_debug_json=debug_json,
             n_threads=self.n_threads,
             max_pas_count=self.max_pas_count,
             f_stat_threshold=self.f_stat_threshold,
-            debug=self.debug,
+            debug=logger.isEnabledFor(logging.DEBUG),
         )
 
         # Map atlas_rpm from the in-memory pas_df (rep_cs → atlas_rpm).
@@ -267,6 +360,17 @@ class PAQR3:
             usage_df["pas_id"].map(atlas_map).fillna(0.0)
         )
 
+        if segment_tsv is not None:
+            segment_df = (
+                usage_df[
+                    ["gene_id", "segment_id", "rna_sum_drop_cov",
+                     "f_stat", "p_value"]
+                ]
+                .drop_duplicates("segment_id")
+                .reset_index(drop=True)
+            )
+            _write_tsv_gz(segment_df, segment_tsv, n_threads=self.n_threads)
+
         cpu = CalculatePosteriorUsage(weight=self.posterior_usage_weight)
         posterior_df = cpu.compute(usage_df)
 
@@ -277,6 +381,5 @@ class PAQR3:
         posterior_out = posterior_df.merge(
             gene_usage_df, on="gene_id", how="left"
         ).drop(columns=["gene_id", "segment_id"])
-        posterior_out.to_csv(posterior_tsv, sep="\t", index=False)
-        logger.info("Posterior usage written to %s", posterior_tsv)
+        _write_tsv_gz(posterior_out, posterior_tsv, n_threads=self.n_threads)
         logger.info("PAQR3 pipeline completed.")
