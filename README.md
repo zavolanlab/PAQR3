@@ -10,7 +10,7 @@ It processes annotation files (GTF), PAS atlases (BED), and coverage data (BED) 
 ### Using conda (recommended)
 
 ```bash
-conda create -f install/environment.yml
+conda env create -f install/environment.yml
 conda activate paqr3
 ```
 
@@ -25,7 +25,7 @@ PAQR3 exposes three sub-commands with higly customizable parameters.
 
 Parses the GTF annotation, extends terminal exons, merges nearby PAS sites, and writes a segments TSV used as input for `paqr3 quant`.
 
-```bash
+```
 paqr3 segment \
   --annotation/-a                   GTF annotation file (required) \
   --pas-atlas/-pa                   PAS atlas BED file (required) \
@@ -39,7 +39,7 @@ paqr3 segment \
 
 ### `paqr3 quant` — quantification from an existing segments TSV
 
-```bash
+```
 paqr3 quant \
   --segments-tsv/-s                 Segments TSV from paqr3 segment (required) \
   --coverage-pos/-c-pos             Positive-strand coverage BigWig (required) \
@@ -61,7 +61,7 @@ paqr3 quant \
 
 Accepts all arguments from both `segment` and `quant` (except `--segments-tsv`).
 
-```bash
+```
 paqr3 full \
   --annotation/-a  --pas-atlas/-pa \
   --coverage-pos/-c-pos  --coverage-neg/-c-neg \
