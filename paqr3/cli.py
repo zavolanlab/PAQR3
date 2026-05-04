@@ -247,7 +247,7 @@ def _run_segment(args: argparse.Namespace) -> None:
         merge_distance=args.merge_distance,
         max_pas_count=0,
         emit=args.emit,
-        gzip=args.gzip,
+        use_gzip=args.gzip,
     )
     paqr3.run_segment()
 
@@ -275,7 +275,7 @@ def _run_quant(args: argparse.Namespace) -> None:
         n_threads=args.threads,
         emit=args.emit,
         chr_sizes_file=args.chr_sizes,
-        gzip=args.gzip,
+        use_gzip=args.gzip,
     )
     paqr3.run_quant(args.segments_tsv, sample_name=args.sample_id)
 
@@ -304,7 +304,7 @@ def _run_full(args: argparse.Namespace) -> None:
         n_threads=args.threads,
         emit=args.emit,
         chr_sizes_file=args.chr_sizes,
-        gzip=args.gzip,
+        use_gzip=args.gzip,
     )
     paqr3.run_full(sample_name=args.sample_id)
 

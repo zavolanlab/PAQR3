@@ -173,7 +173,7 @@ class PAQR3:
         n_threads: int = 1,
         emit: list[str] | None = None,
         chr_sizes_file: str | None = None,
-        gzip: bool = True,
+        use_gzip: bool = True,
     ) -> None:
         self.annotation_file = annotation_file
         self.pas_atlas_file = pas_atlas_file
@@ -189,7 +189,7 @@ class PAQR3:
         self.n_threads = n_threads
         self.emit = emit
         self.chr_sizes_file = chr_sizes_file
-        self.gzip = gzip
+        self.gzip = use_gzip
 
     def _sample_name(self) -> str:
         return os.path.basename(self.coverage_bw_pos).split(".")[0]
@@ -415,7 +415,7 @@ class PAQR3:
         # Merge gene_weighted_usage into posterior output; drop redundant
         # gene_id and segment_id columns (subsegment_id encodes both).
         posterior_out = posterior_df.merge(
-            gene_usage_df, on="gene_id", how="left"
+            gene_usage_df, on="subsegment_id", how="left"
         ).drop(columns=["gene_id", "segment_id"])
         _write_tsv(
             posterior_out, posterior_tsv,
@@ -558,7 +558,7 @@ class PAQR3:
         # Merge gene_weighted_usage into posterior output; drop redundant
         # gene_id and segment_id columns (subsegment_id encodes both).
         posterior_out = posterior_df.merge(
-            gene_usage_df, on="gene_id", how="left"
+            gene_usage_df, on="subsegment_id", how="left"
         ).drop(columns=["gene_id", "segment_id"])
         _write_tsv(
             posterior_out, posterior_tsv,
