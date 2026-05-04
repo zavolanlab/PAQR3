@@ -21,7 +21,6 @@ import pyBigWig  # type: ignore
 from paqr3.construct_segments import ConstructSegments
 from paqr3.calculate_cov_metrics import CalculateCoverages
 from paqr3.calculate_posterior_usage import CalculatePosteriorUsage
-from paqr3.calculate_gene_level_usages import CalculateGeneLevelUsage
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +56,9 @@ def _resolve_emit(emit: list[str] | None) -> set[str]:
 
     ``all``   expands to all BigWig modes (``mean_cov``, ``observed``,
               ``posterior``, ``atlas``).
-    ``debug`` expands to all BigWig modes plus ``segment_info``,
-              ``debug_json``, and ``debug`` (the last also triggers debug
-              BEDs in segment mode).
+    ``debug`` expands to all BigWig modes plus ``debug_json`` and
+              ``debug`` (the last also triggers debug BEDs in segment
+              mode).
     """
     if not emit:
         return set()
@@ -69,7 +68,6 @@ def _resolve_emit(emit: list[str] | None) -> set[str]:
             resolved |= _EMIT_BW_MODES
         elif token == "debug":
             resolved |= _EMIT_BW_MODES
-            resolved.add("segment_info")
             resolved.add("debug_json")
             resolved.add("debug")
         else:
@@ -301,19 +299,13 @@ class PAQR3:
     ) -> None:
         """Run the quantification stage from a segments TSV.
 
-        Always writes ``{sname}_posterior_usage.tsv[.gz]``.  Additional
-        outputs are controlled by ``self.emit``:
+        Always writes three output files:
 
-        - ``segment_info`` — ``{sname}_segment_info.tsv[.gz]``.
-        - ``debug``        — ``{sname}_debug.json`` + debug BED files.
-        - ``mean_cov``     — ``{sname}_mean_cov.bw`` (subsegment-level).
-        - ``observed``     — ``{sname}_observed_usage.bw`` +
-          ``{sname}_observed_rpm.bw``.
-        - ``posterior``    — ``{sname}_posterior_rpm.bw`` +
-          ``{sname}_posterior_usage.bw``.
-        - ``atlas``        — ``{sname}_atlas_rpm.bw`` +
-          ``{sname}_atlas_usage.bw``.
-        - ``all``          — all four BigWig groups above.
+        - ``{sname}_segment_results.tsv[.gz]``
+        - ``{sname}_subsegment_results.tsv[.gz]``
+        - ``{sname}_pas_results.tsv[.gz]``
+
+        Additional BigWig outputs are controlled by ``self.emit``.
 
         Args:
             segments_tsv: Path to the segments TSV from the
@@ -326,7 +318,9 @@ class PAQR3:
             sname = sample_name
         else:
             pos_stem = self._sample_name()
-            neg_stem = os.path.basename(self.coverage_bw_neg).split(".")[0]
+            neg_stem = os.path.basename(
+                self.coverage_bw_neg
+            ).split(".")[0]
             if pos_stem != neg_stem:
                 raise ValueError(
                     "Coverage files must share the same sample name."
@@ -338,27 +332,21 @@ class PAQR3:
         effective_emit = _resolve_emit(self.emit)
         ext = ".tsv.gz" if self.gzip else ".tsv"
 
-        posterior_tsv = os.path.join(
-            results_dir, f"{sname}_posterior_usage{ext}"
-        )
         debug_json = (
             os.path.join(results_dir, f"{sname}_debug.json")
             if "debug_json" in effective_emit
             else None
         )
-        segment_tsv = (
-            os.path.join(results_dir, f"{sname}_segment_info{ext}")
-            if "segment_info" in effective_emit
-            else None
-        )
 
-        # Load the segments TSV; derive segment_id and gene_id from
-        # the subsegment_id field ({gene_id}:{TypeNNN}:{sub:03d}).
+        # Load segments TSV; derive segment_id and gene_id from
+        # subsegment_id ({gene_id}:{TypeNNN}:{sub:03d}).
         seg_df = pd.read_csv(segments_tsv, sep="\t")
         seg_df["segment_id"] = (
             seg_df["subsegment_id"].str.rsplit(":", n=1).str[0]
         )
-        seg_df["gene_id"] = seg_df["subsegment_id"].str.split(":").str[0]
+        seg_df["gene_id"] = (
+            seg_df["subsegment_id"].str.split(":").str[0]
+        )
         subsegments_df = seg_df.rename(
             columns={"overlapping_pas_id": "pas_id"}
         )
@@ -388,44 +376,101 @@ class PAQR3:
             usage_df["subsegment_id"].map(atlas_map).fillna(0.0)
         )
 
-        if segment_tsv is not None:
-            segment_df = (
-                usage_df[
-                    [
-                        "gene_id",
-                        "segment_id",
-                        "rna_sum_drop_cov",
-                        "f_stat",
-                        "p_value",
-                    ]
-                ]
-                .drop_duplicates("segment_id")
-                .reset_index(drop=True)
-            )
-            _write_tsv(
-                segment_df, segment_tsv,
-                n_threads=self.n_threads, compress=self.gzip,
-            )
-
         cpu = CalculatePosteriorUsage(weight=self.posterior_usage_weight)
         posterior_df = cpu.compute(usage_df)
 
-        gene_usage_df = CalculateGeneLevelUsage(posterior_df).compute()
-
-        # Merge gene_weighted_usage into posterior output; drop redundant
-        # gene_id and segment_id columns (subsegment_id encodes both).
-        posterior_out = posterior_df.merge(
-            gene_usage_df, on="subsegment_id", how="left"
-        ).drop(columns=["gene_id", "segment_id"])
-        _write_tsv(
-            posterior_out, posterior_tsv,
-            n_threads=self.n_threads, compress=self.gzip,
+        # Segment coordinates (min start / max end over subsegments).
+        seg_coords = (
+            subsegments_df
+            .groupby("segment_id", sort=False)
+            .agg(
+                chrom=("chrom", "first"),
+                strand=("strand", "first"),
+                start=("start", "min"),
+                end=("end", "max"),
+            )
+            .reset_index()
         )
 
+        # _segment_results.tsv
+        seg_stats = (
+            usage_df[
+                [
+                    "segment_id", "rna_sum_drop_cov",
+                    "f_stat", "p_value",
+                ]
+            ]
+            .drop_duplicates("segment_id")
+            .reset_index(drop=True)
+        )
+        segment_results = seg_coords.merge(
+            seg_stats, on="segment_id", how="inner"
+        )[
+            [
+                "chrom", "start", "end", "strand",
+                "segment_id", "rna_sum_drop_cov",
+                "f_stat", "p_value",
+            ]
+        ]
+        _write_tsv(
+            segment_results,
+            os.path.join(
+                results_dir, f"{sname}_segment_results{ext}"
+            ),
+            n_threads=self.n_threads,
+            compress=self.gzip,
+        )
+
+        # _subsegment_results.tsv
+        subseg_results = (
+            subsegments_df[
+                [
+                    "chrom", "start", "end", "subsegment_id",
+                    "strand", "pas_id", "atlas_rpm",
+                ]
+            ]
+            .merge(
+                raw_cov_df[["subsegment_id", "mean_cov"]]
+                .drop_duplicates("subsegment_id"),
+                on="subsegment_id",
+                how="left",
+            )
+            .merge(
+                posterior_df[
+                    [
+                        "subsegment_id",
+                        "observed_rpm", "posterior_rpm",
+                    ]
+                ].drop_duplicates("subsegment_id"),
+                on="subsegment_id",
+                how="left",
+            )
+            [
+                [
+                    "chrom", "start", "end", "subsegment_id",
+                    "strand", "pas_id", "mean_cov",
+                    "atlas_rpm", "observed_rpm", "posterior_rpm",
+                ]
+            ]
+        )
+        _write_tsv(
+            subseg_results,
+            os.path.join(
+                results_dir, f"{sname}_subsegment_results{ext}"
+            ),
+            n_threads=self.n_threads,
+            compress=self.gzip,
+        )
+
+        # PAS cluster coordinates (with strand) from segments TSV.
         if "pas_start" in seg_df.columns:
-            _pc = (
+            pas_coords: pd.DataFrame | None = (
                 seg_df[
-                    ["chrom", "overlapping_pas_id", "pas_start", "pas_end"]
+                    [
+                        "chrom", "strand",
+                        "overlapping_pas_id",
+                        "pas_start", "pas_end",
+                    ]
                 ]
                 .query("overlapping_pas_id != '.'")
                 .drop_duplicates("overlapping_pas_id")
@@ -435,9 +480,53 @@ class PAQR3:
                     "pas_end": "end",
                 })
             )
-            pas_coords: pd.DataFrame | None = _pc
         else:
             pas_coords = None
+
+        # _pas_results.tsv
+        pas_usage = posterior_df[
+            [
+                "pas_id", "subsegment_id",
+                "rna_usage", "atlas_rel_usage",
+                "posterior_rel_usage",
+            ]
+        ].rename(columns={
+            "rna_usage": "observed_usage",
+            "atlas_rel_usage": "atlas_usage",
+            "posterior_rel_usage": "posterior_usage",
+        })
+        if pas_coords is not None:
+            pas_results = pas_usage.merge(
+                pas_coords[
+                    ["pas_id", "chrom", "start", "end", "strand"]
+                ],
+                on="pas_id",
+                how="left",
+            )[
+                [
+                    "chrom", "start", "end", "strand",
+                    "pas_id", "subsegment_id",
+                    "atlas_usage", "observed_usage",
+                    "posterior_usage",
+                ]
+            ]
+        else:
+            pas_results = pas_usage[
+                [
+                    "pas_id", "subsegment_id",
+                    "atlas_usage", "observed_usage",
+                    "posterior_usage",
+                ]
+            ]
+        _write_tsv(
+            pas_results,
+            os.path.join(
+                results_dir, f"{sname}_pas_results{ext}"
+            ),
+            n_threads=self.n_threads,
+            compress=self.gzip,
+        )
+
         self._emit_bigwigs(
             effective_emit,
             results_dir,
@@ -461,7 +550,9 @@ class PAQR3:
             sname = sample_name
         else:
             sname = self._sample_name()
-            neg_stem = os.path.basename(self.coverage_bw_neg).split(".")[0]
+            neg_stem = os.path.basename(
+                self.coverage_bw_neg
+            ).split(".")[0]
             if sname != neg_stem:
                 raise ValueError(
                     "Coverage files must share the same sample name."
@@ -471,7 +562,9 @@ class PAQR3:
         effective_emit = _resolve_emit(self.emit)
         ext = ".tsv.gz" if self.gzip else ".tsv"
 
-        segments_tsv = os.path.join(results_dir, f"{sname}_segments.tsv")
+        segments_tsv = os.path.join(
+            results_dir, f"{sname}_segments.tsv"
+        )
         debug_prefix = (
             os.path.join(results_dir, f"{sname}_debug")
             if "debug" in effective_emit
@@ -489,22 +582,16 @@ class PAQR3:
             merge_distance=self.merge_distance,
             out_debug_prefix=debug_prefix,
         )
-        assert cs.pas_df is not None, "ConstructSegments.run() must set pas_df"
+        assert cs.pas_df is not None, (
+            "ConstructSegments.run() must set pas_df"
+        )
 
-        # Stage 2: use in-memory DataFrame (avoids re-reading the TSV).
+        # Stage 2: in-memory DataFrame (avoids re-reading the TSV).
         subsegments_df = cs.create_subsegments_dataframe()
 
-        posterior_tsv = os.path.join(
-            results_dir, f"{sname}_posterior_usage{ext}"
-        )
         debug_json = (
             os.path.join(results_dir, f"{sname}_debug.json")
             if "debug_json" in effective_emit
-            else None
-        )
-        segment_tsv = (
-            os.path.join(results_dir, f"{sname}_segment_info{ext}")
-            if "segment_info" in effective_emit
             else None
         )
 
@@ -523,53 +610,149 @@ class PAQR3:
             debug=logger.isEnabledFor(logging.DEBUG),
         )
 
-        # Map atlas_rpm from the in-memory pas_df (rep_cs → atlas_rpm).
+        # Map atlas_rpm from in-memory pas_df (rep_cs → atlas_rpm).
         atlas_map = (
             cs.pas_df[["rep_cs", "atlas_rpm"]]
             .drop_duplicates("rep_cs")
             .set_index("rep_cs")["atlas_rpm"]
         )
-        usage_df["atlas_rpm"] = usage_df["pas_id"].map(atlas_map).fillna(0.0)
-
-        if segment_tsv is not None:
-            segment_df = (
-                usage_df[
-                    [
-                        "gene_id",
-                        "segment_id",
-                        "rna_sum_drop_cov",
-                        "f_stat",
-                        "p_value",
-                    ]
-                ]
-                .drop_duplicates("segment_id")
-                .reset_index(drop=True)
-            )
-            _write_tsv(
-                segment_df, segment_tsv,
-                n_threads=self.n_threads, compress=self.gzip,
-            )
+        usage_df["atlas_rpm"] = (
+            usage_df["pas_id"].map(atlas_map).fillna(0.0)
+        )
+        subsegments_df["atlas_rpm"] = (
+            subsegments_df["pas_id"].map(atlas_map).fillna(0.0)
+        )
 
         cpu = CalculatePosteriorUsage(weight=self.posterior_usage_weight)
         posterior_df = cpu.compute(usage_df)
 
-        gene_usage_df = CalculateGeneLevelUsage(posterior_df).compute()
-
-        # Merge gene_weighted_usage into posterior output; drop redundant
-        # gene_id and segment_id columns (subsegment_id encodes both).
-        posterior_out = posterior_df.merge(
-            gene_usage_df, on="subsegment_id", how="left"
-        ).drop(columns=["gene_id", "segment_id"])
-        _write_tsv(
-            posterior_out, posterior_tsv,
-            n_threads=self.n_threads, compress=self.gzip,
+        # Segment coordinates (min start / max end over subsegments).
+        seg_coords = (
+            subsegments_df
+            .groupby("segment_id", sort=False)
+            .agg(
+                chrom=("chrom", "first"),
+                strand=("strand", "first"),
+                start=("start", "min"),
+                end=("end", "max"),
+            )
+            .reset_index()
         )
 
+        # _segment_results.tsv
+        seg_stats = (
+            usage_df[
+                [
+                    "segment_id", "rna_sum_drop_cov",
+                    "f_stat", "p_value",
+                ]
+            ]
+            .drop_duplicates("segment_id")
+            .reset_index(drop=True)
+        )
+        segment_results = seg_coords.merge(
+            seg_stats, on="segment_id", how="inner"
+        )[
+            [
+                "chrom", "start", "end", "strand",
+                "segment_id", "rna_sum_drop_cov",
+                "f_stat", "p_value",
+            ]
+        ]
+        _write_tsv(
+            segment_results,
+            os.path.join(
+                results_dir, f"{sname}_segment_results{ext}"
+            ),
+            n_threads=self.n_threads,
+            compress=self.gzip,
+        )
+
+        # _subsegment_results.tsv
+        subseg_results = (
+            subsegments_df[
+                [
+                    "chrom", "start", "end", "subsegment_id",
+                    "strand", "pas_id", "atlas_rpm",
+                ]
+            ]
+            .merge(
+                raw_cov_df[["subsegment_id", "mean_cov"]]
+                .drop_duplicates("subsegment_id"),
+                on="subsegment_id",
+                how="left",
+            )
+            .merge(
+                posterior_df[
+                    [
+                        "subsegment_id",
+                        "observed_rpm", "posterior_rpm",
+                    ]
+                ].drop_duplicates("subsegment_id"),
+                on="subsegment_id",
+                how="left",
+            )
+            [
+                [
+                    "chrom", "start", "end", "subsegment_id",
+                    "strand", "pas_id", "mean_cov",
+                    "atlas_rpm", "observed_rpm", "posterior_rpm",
+                ]
+            ]
+        )
+        _write_tsv(
+            subseg_results,
+            os.path.join(
+                results_dir, f"{sname}_subsegment_results{ext}"
+            ),
+            n_threads=self.n_threads,
+            compress=self.gzip,
+        )
+
+        # PAS cluster coordinates (with strand) from in-memory pas_df.
         pas_coords = (
-            cs.pas_df[["rep_cs", "chrom", "start", "end"]]
+            cs.pas_df[
+                ["rep_cs", "chrom", "strand", "start", "end"]
+            ]
             .rename(columns={"rep_cs": "pas_id"})
             .drop_duplicates("pas_id")
         )
+
+        # _pas_results.tsv
+        pas_usage = posterior_df[
+            [
+                "pas_id", "subsegment_id",
+                "rna_usage", "atlas_rel_usage",
+                "posterior_rel_usage",
+            ]
+        ].rename(columns={
+            "rna_usage": "observed_usage",
+            "atlas_rel_usage": "atlas_usage",
+            "posterior_rel_usage": "posterior_usage",
+        })
+        pas_results = pas_usage.merge(
+            pas_coords[
+                ["pas_id", "chrom", "start", "end", "strand"]
+            ],
+            on="pas_id",
+            how="left",
+        )[
+            [
+                "chrom", "start", "end", "strand",
+                "pas_id", "subsegment_id",
+                "atlas_usage", "observed_usage",
+                "posterior_usage",
+            ]
+        ]
+        _write_tsv(
+            pas_results,
+            os.path.join(
+                results_dir, f"{sname}_pas_results{ext}"
+            ),
+            n_threads=self.n_threads,
+            compress=self.gzip,
+        )
+
         self._emit_bigwigs(
             effective_emit,
             results_dir,

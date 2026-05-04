@@ -52,7 +52,6 @@ _EMIT_CHOICES = [
     "atlas",
     "all",
     "debug",
-    "segment_info",
 ]
 
 
@@ -86,8 +85,8 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
             " 'atlas' → atlas_rpm.bw + atlas_usage.bw;"
             " 'mean_cov' → mean_cov.bw (subsegment-level);"
             " 'all' → all four BigWig groups;"
-            " 'debug' → all + segment_info + JSON + debug BEDs."
-            " Default: none (only posterior_usage.tsv[.gz] is written)."
+            " 'debug' → all BigWigs + JSON + debug BEDs."
+            " Default: none (only the three results TSVs are written)."
         ),
     )
     p.add_argument(
