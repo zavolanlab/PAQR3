@@ -6,7 +6,7 @@ import pytest
 
 # Root of the repository (one level above this file's parent).
 _REPO_ROOT = Path(__file__).parent.parent
-_DATA_DIR = _REPO_ROOT / "data"
+_DATA_DIR = _REPO_ROOT / "tests" / "files"
 
 
 @pytest.fixture(scope="session")
