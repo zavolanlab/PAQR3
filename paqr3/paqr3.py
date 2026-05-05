@@ -1,13 +1,4 @@
-"""PAQR3 pipeline orchestration.
-
-Exposes three run modes:
-
-- :meth:`PAQR3.run_segment`: annotation-based segmentation only;
-  produces the segments TSV (and optionally a debug BED).
-- :meth:`PAQR3.run_quant`: quantification only; reads the segments TSV
-  and produces PAS usage tables.
-- :meth:`PAQR3.run_full`: runs both stages end-to-end.
-"""
+"""PAQR3 pipeline orchestration."""
 
 import gzip
 import logging
@@ -55,11 +46,8 @@ _EMIT_BW_SPEC: dict[str, list[tuple[str, str, str, str]]] = {
 def _resolve_emit(emit: list[str] | None) -> set[str]:
     """Expand shortcut emit tokens into the full set of requested outputs.
 
-    ``all``   expands to all BigWig modes (``mean_cov``, ``observed``,
-              ``posterior``, ``atlas``).
-    ``debug`` expands to all BigWig modes plus ``debug_json`` and
-              ``debug`` (the last also triggers debug BEDs in segment
-              mode).
+    "all" expands to all BigWig modes; "debug" expands to all BigWig
+    modes plus debug_json and debug (which also triggers debug BEDs).
     """
     if not emit:
         return set()
@@ -96,7 +84,7 @@ def _write_tsv(
     n_threads: int = 1,
     compress: bool = True,
 ) -> None:
-    """Write *df* to a TSV, optionally gzip-compressed via pigz or gzip."""
+    """Write df to a TSV, optionally gzip-compressed via pigz or gzip."""
     if compress:
         csv_bytes = df.to_csv(sep="\t", index=False).encode()
         if shutil.which("pigz"):
@@ -121,13 +109,12 @@ def _write_bigwig(
     chrom_sizes: dict[str, int],
     path: str,
 ) -> None:
-    """Write a BigWig file with one constant-value entry per subsegment.
+    """Write a BigWig with one constant-value entry per interval.
 
     Args:
-        df: DataFrame with columns ``chrom``, ``start``, ``end``, and
-            *value_col*.
-        value_col: Column in *df* to use as the BigWig signal value.
-        chrom_sizes: ``{chrom: size}`` dict used for the BigWig header.
+        df: DataFrame with columns chrom, start, end, and value_col.
+        value_col: Column to use as the signal value.
+        chrom_sizes: {chrom: size} dict for the BigWig header.
         path: Output file path.
     """
     mask = df[value_col].notna() & df["chrom"].isin(chrom_sizes)
@@ -210,20 +197,15 @@ class PAQR3:
     ) -> None:
         """Write BigWig files for all requested emit modes.
 
-        Each mode in ``_EMIT_BW_SPEC`` may produce multiple BigWig files
-        (one per entry in its spec list).
-
         Args:
             effective_emit: Resolved set of emit tokens.
             results_dir: Output directory for this sample.
             sname: Sample name prefix for file names.
-            raw_cov_df: Raw per-subsegment coverage metrics (no coords).
+            raw_cov_df: Raw per-subsegment coverage metrics.
             posterior_df: Per-PAS posterior usage DataFrame.
-            subsegments_df: Sub-segment coordinate table for subseg
-                coord-type modes.
-            pas_coords: DataFrame with columns ``pas_id``, ``chrom``,
-                ``start``, ``end`` giving merged PAS cluster coordinates
-                for pas coord-type modes.
+            subsegments_df: Sub-segment coordinate table.
+            pas_coords: PAS cluster coordinates (pas_id, chrom, start,
+                end) for PAS coord-type modes.
         """
         bw_modes = effective_emit & _EMIT_BW_MODES
         if not bw_modes:
@@ -257,18 +239,11 @@ class PAQR3:
     def run_segment(self, output_dir: str | None = None) -> str:
         """Run the segmentation stage and write the segments TSV.
 
-        Produces:
-
-        - ``output_segments.tsv`` — primary output; input for
-          :meth:`run_quant`.
-        - ``output_segments_debug_{genes,segments,subsegments,pas}.bed``
-          — debug BEDs (only when ``debug`` is in ``emit``).
-
         Args:
             output_dir: Override the instance output directory.
 
         Returns:
-            Path to the segments TSV file.
+            Path to the written segments TSV file.
         """
         out_dir = output_dir or self.output_dir
         os.makedirs(out_dir, exist_ok=True)
@@ -300,20 +275,11 @@ class PAQR3:
     ) -> None:
         """Run the quantification stage from a segments TSV.
 
-        Always writes three output files:
-
-        - ``{sname}_segment_results.tsv[.gz]``
-        - ``{sname}_subsegment_results.tsv[.gz]``
-        - ``{sname}_pas_results.tsv[.gz]``
-
-        Additional BigWig outputs are controlled by ``self.emit``.
-
         Args:
-            segments_tsv: Path to the segments TSV from the
-                segmentation stage.
+            segments_tsv: Path to the segments TSV from segmentation.
             output_dir: Override the instance output directory.
-            sample_name: Override the sample name derived from the
-                BigWig filename.
+            sample_name: Override the sample name from the BigWig
+                filename.
         """
         if sample_name is not None:
             sname = sample_name
@@ -559,8 +525,8 @@ class PAQR3:
         """Run segmentation and quantification end-to-end.
 
         Args:
-            sample_name: Override the sample name derived from the
-                BigWig filename.
+            sample_name: Override the sample name from the BigWig
+                filename.
         """
         if sample_name is not None:
             sname = sample_name
