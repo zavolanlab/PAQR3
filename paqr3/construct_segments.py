@@ -891,7 +891,7 @@ class ConstructSegments:
 
     def create_segments_tsv(
         self,
-        out_tsv: str,
+        out_tsv: str | None = None,
         out_debug_prefix: str | None = None,
     ) -> None:
         """Write the segments TSV (and optionally four debug BED files).
@@ -931,7 +931,9 @@ class ConstructSegments:
         entries appear at most once per unique representative CS.
 
         Args:
-            out_tsv: Output path for the segments TSV file.
+            out_tsv: Output path for the segments TSV file.  Pass
+                ``None`` to skip writing the TSV (only debug BEDs
+                are written when *out_debug_prefix* is set).
             out_debug_prefix: Optional path prefix for the debug BED
                 files (no extension; category suffix is appended).
         """
@@ -1066,11 +1068,12 @@ class ConstructSegments:
                 "pas_start", "pas_end",
             ],
         )
-        tsv_df.to_csv(out_tsv, sep="\t", index=False)
-        logger.info(
-            "Segments TSV written to %s (%d subsegments)",
-            out_tsv, len(tsv_df),
-        )
+        if out_tsv is not None:
+            tsv_df.to_csv(out_tsv, sep="\t", index=False)
+            logger.info(
+                "Segments TSV written to %s (%d subsegments)",
+                out_tsv, len(tsv_df),
+            )
 
         if out_debug_prefix and debug_rows:
             debug_df = pd.DataFrame(
@@ -1332,7 +1335,7 @@ class ConstructSegments:
 
     def run(
         self,
-        out_tsv: str,
+        out_tsv: str | None = None,
         merge_distance: int = 5,
         out_debug_prefix: str | None = None,
     ) -> None:
@@ -1342,7 +1345,10 @@ class ConstructSegments:
         then writes the segments TSV via :meth:`create_segments_tsv`.
 
         Args:
-            out_tsv: Output path for the segments TSV.
+            out_tsv: Output path for the segments TSV.  Pass ``None``
+                to skip TSV writing (useful when the in-memory
+                DataFrame is consumed directly via
+                :meth:`create_subsegments_dataframe`).
             merge_distance: Maximum gap (in bp) for merging adjacent
                 PAS sites in the atlas.
             out_debug_prefix: Optional path prefix for the four debug

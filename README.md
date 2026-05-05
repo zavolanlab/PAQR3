@@ -100,9 +100,9 @@ Outputs are written to `{output-dir}/{sample}_results/`:
 
 | File | Description |
 |---|---|
-| `{sample}_segment_results.tsv[.gz]` | One row per evaluated segment. Columns: `chrom`, `start`, `end`, `strand`, `segment_id`, `rna_sum_drop_cov`, `f_stat`, `p_value`. |
-| `{sample}_subsegment_results.tsv[.gz]` | One row per subsegment (including trailing). Columns: `chrom`, `start`, `end`, `subsegment_id`, `strand`, `pas_id`, `mean_cov`, `atlas_rpm`, `observed_rpm`, `posterior_rpm`. |
-| `{sample}_pas_results.tsv[.gz]` | One row per PAS. Columns: `chrom`, `start`, `end`, `strand`, `pas_id`, `subsegment_id`, `atlas_usage`, `observed_usage`, `posterior_usage`. |
+| `{sample}_segment_results.tsv[.gz]` | One row per evaluated segment. Columns: `chr`, `start`, `end`, `strand`, `segment_id`, `rna_sum_drop_cov`, `f_stat`, `p_value`. |
+| `{sample}_subsegment_results.tsv[.gz]` | One row per subsegment (including trailing). Columns: `chr`, `start`, `end`, `strand`, `subsegment_id`, `pas_id`, `mean_cov`, `atlas_rpm`, `observed_rpm`, `posterior_rpm`. |
+| `{sample}_pas_results.tsv[.gz]` | One row per PAS. Columns: `chr`, `start`, `end`, `strand`, `pas_id`, `subsegment_id`, `atlas_usage`, `observed_usage`, `posterior_usage`, `gene_level_usage`. |
 | `{sample}_mean_cov.bw` | Mean RNA-seq coverage per subsegment. Written when `--emit mean_cov`, `all`, or `debug`. |
 | `{sample}_observed_usage.bw` | F-stat derived PAS usage fraction, at PAS cluster coordinates. |
 | `{sample}_observed_rpm.bw` | Observed coverage-drop RPM per PAS. |

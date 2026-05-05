@@ -63,9 +63,7 @@ class CalculatePosteriorUsage:
         # 1) Observed RPM from drop coverage.
         total_drop = df["rna_drop_cov"].sum()
         df["observed_rpm"] = (
-            df["rna_drop_cov"] / total_drop * 1e6
-            if total_drop > 0
-            else 0.0
+            df["rna_drop_cov"] / total_drop * 1e6 if total_drop > 0 else 0.0
         )
 
         # 2) Weighted posterior RPM.

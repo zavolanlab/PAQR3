@@ -21,6 +21,7 @@ import pyBigWig  # type: ignore
 from paqr3.construct_segments import ConstructSegments
 from paqr3.calculate_cov_metrics import CalculateCoverages
 from paqr3.calculate_posterior_usage import CalculatePosteriorUsage
+from paqr3.calculate_gene_level_usages import CalculateGeneLevelUsage
 
 logger = logging.getLogger(__name__)
 
@@ -392,6 +393,8 @@ class PAQR3:
             .reset_index()
         )
 
+        gene_usage_df = CalculateGeneLevelUsage(posterior_df).compute()
+
         # _segment_results.tsv
         seg_stats = (
             usage_df[
@@ -403,15 +406,17 @@ class PAQR3:
             .drop_duplicates("segment_id")
             .reset_index(drop=True)
         )
-        segment_results = seg_coords.merge(
-            seg_stats, on="segment_id", how="inner"
-        )[
+        segment_results = (
+            seg_coords.merge(seg_stats, on="segment_id", how="inner")
             [
-                "chrom", "start", "end", "strand",
-                "segment_id", "rna_sum_drop_cov",
-                "f_stat", "p_value",
+                [
+                    "chrom", "start", "end", "strand",
+                    "segment_id", "rna_sum_drop_cov",
+                    "f_stat", "p_value",
+                ]
             ]
-        ]
+            .rename(columns={"chrom": "chr"})
+        )
         _write_tsv(
             segment_results,
             os.path.join(
@@ -425,8 +430,8 @@ class PAQR3:
         subseg_results = (
             subsegments_df[
                 [
-                    "chrom", "start", "end", "subsegment_id",
-                    "strand", "pas_id", "atlas_rpm",
+                    "chrom", "start", "end", "strand",
+                    "subsegment_id", "pas_id", "atlas_rpm",
                 ]
             ]
             .merge(
@@ -447,11 +452,12 @@ class PAQR3:
             )
             [
                 [
-                    "chrom", "start", "end", "subsegment_id",
-                    "strand", "pas_id", "mean_cov",
+                    "chrom", "start", "end", "strand",
+                    "subsegment_id", "pas_id", "mean_cov",
                     "atlas_rpm", "observed_rpm", "posterior_rpm",
                 ]
             ]
+            .rename(columns={"chrom": "chr"})
         )
         _write_tsv(
             subseg_results,
@@ -496,28 +502,38 @@ class PAQR3:
             "posterior_rel_usage": "posterior_usage",
         })
         if pas_coords is not None:
-            pas_results = pas_usage.merge(
-                pas_coords[
-                    ["pas_id", "chrom", "start", "end", "strand"]
-                ],
-                on="pas_id",
-                how="left",
-            )[
+            pas_results = (
+                pas_usage
+                .merge(
+                    pas_coords[
+                        ["pas_id", "chrom", "start", "end", "strand"]
+                    ],
+                    on="pas_id",
+                    how="left",
+                )
+                .merge(gene_usage_df, on="subsegment_id", how="left")
                 [
-                    "chrom", "start", "end", "strand",
-                    "pas_id", "subsegment_id",
-                    "atlas_usage", "observed_usage",
-                    "posterior_usage",
+                    [
+                        "chrom", "start", "end", "strand",
+                        "pas_id", "subsegment_id",
+                        "atlas_usage", "observed_usage",
+                        "posterior_usage", "gene_level_usage",
+                    ]
                 ]
-            ]
+                .rename(columns={"chrom": "chr"})
+            )
         else:
-            pas_results = pas_usage[
+            pas_results = (
+                pas_usage
+                .merge(gene_usage_df, on="subsegment_id", how="left")
                 [
-                    "pas_id", "subsegment_id",
-                    "atlas_usage", "observed_usage",
-                    "posterior_usage",
+                    [
+                        "pas_id", "subsegment_id",
+                        "atlas_usage", "observed_usage",
+                        "posterior_usage", "gene_level_usage",
+                    ]
                 ]
-            ]
+            )
         _write_tsv(
             pas_results,
             os.path.join(
@@ -562,23 +578,19 @@ class PAQR3:
         effective_emit = _resolve_emit(self.emit)
         ext = ".tsv.gz" if self.gzip else ".tsv"
 
-        segments_tsv = os.path.join(
-            results_dir, f"{sname}_segments.tsv"
-        )
         debug_prefix = (
             os.path.join(results_dir, f"{sname}_debug")
             if "debug" in effective_emit
             else None
         )
 
-        # Stage 1: segmentation.
+        # Stage 1: segmentation (TSV skipped; in-memory DataFrame used).
         cs = ConstructSegments(
             self.annotation_file,
             self.pas_atlas_file,
             self.downstream_exon_extension,
         )
         cs.run(
-            segments_tsv,
             merge_distance=self.merge_distance,
             out_debug_prefix=debug_prefix,
         )
@@ -626,6 +638,8 @@ class PAQR3:
         cpu = CalculatePosteriorUsage(weight=self.posterior_usage_weight)
         posterior_df = cpu.compute(usage_df)
 
+        gene_usage_df = CalculateGeneLevelUsage(posterior_df).compute()
+
         # Segment coordinates (min start / max end over subsegments).
         seg_coords = (
             subsegments_df
@@ -650,15 +664,17 @@ class PAQR3:
             .drop_duplicates("segment_id")
             .reset_index(drop=True)
         )
-        segment_results = seg_coords.merge(
-            seg_stats, on="segment_id", how="inner"
-        )[
+        segment_results = (
+            seg_coords.merge(seg_stats, on="segment_id", how="inner")
             [
-                "chrom", "start", "end", "strand",
-                "segment_id", "rna_sum_drop_cov",
-                "f_stat", "p_value",
+                [
+                    "chrom", "start", "end", "strand",
+                    "segment_id", "rna_sum_drop_cov",
+                    "f_stat", "p_value",
+                ]
             ]
-        ]
+            .rename(columns={"chrom": "chr"})
+        )
         _write_tsv(
             segment_results,
             os.path.join(
@@ -672,8 +688,8 @@ class PAQR3:
         subseg_results = (
             subsegments_df[
                 [
-                    "chrom", "start", "end", "subsegment_id",
-                    "strand", "pas_id", "atlas_rpm",
+                    "chrom", "start", "end", "strand",
+                    "subsegment_id", "pas_id", "atlas_rpm",
                 ]
             ]
             .merge(
@@ -694,11 +710,12 @@ class PAQR3:
             )
             [
                 [
-                    "chrom", "start", "end", "subsegment_id",
-                    "strand", "pas_id", "mean_cov",
+                    "chrom", "start", "end", "strand",
+                    "subsegment_id", "pas_id", "mean_cov",
                     "atlas_rpm", "observed_rpm", "posterior_rpm",
                 ]
             ]
+            .rename(columns={"chrom": "chr"})
         )
         _write_tsv(
             subseg_results,
@@ -730,20 +747,26 @@ class PAQR3:
             "atlas_rel_usage": "atlas_usage",
             "posterior_rel_usage": "posterior_usage",
         })
-        pas_results = pas_usage.merge(
-            pas_coords[
-                ["pas_id", "chrom", "start", "end", "strand"]
-            ],
-            on="pas_id",
-            how="left",
-        )[
+        pas_results = (
+            pas_usage
+            .merge(
+                pas_coords[
+                    ["pas_id", "chrom", "start", "end", "strand"]
+                ],
+                on="pas_id",
+                how="left",
+            )
+            .merge(gene_usage_df, on="subsegment_id", how="left")
             [
-                "chrom", "start", "end", "strand",
-                "pas_id", "subsegment_id",
-                "atlas_usage", "observed_usage",
-                "posterior_usage",
+                [
+                    "chrom", "start", "end", "strand",
+                    "pas_id", "subsegment_id",
+                    "atlas_usage", "observed_usage",
+                    "posterior_usage", "gene_level_usage",
+                ]
             ]
-        ]
+            .rename(columns={"chrom": "chr"})
+        )
         _write_tsv(
             pas_results,
             os.path.join(
