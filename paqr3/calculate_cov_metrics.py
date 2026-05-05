@@ -10,7 +10,6 @@ from functools import partial
 import numpy as np
 import pandas as pd  # type: ignore
 import pyBigWig  # type: ignore
-import pysam  # type: ignore
 from pybedtools import BedTool  # type: ignore
 from scipy.stats import f  # type: ignore
 
@@ -493,7 +492,6 @@ class CalculateCoverages:
     Attributes:
         coverage_bw_pos: Path to the positive-strand BigWig file.
         coverage_bw_neg: Path to the negative-strand BigWig file.
-        bam_file: Optional BAM path for expression rank statistics.
         f_stat_threshold: Default F-statistic threshold for run().
     """
 
@@ -501,19 +499,15 @@ class CalculateCoverages:
         self,
         coverage_bw_pos,
         coverage_bw_neg,
-        bam_file=None,
         f_stat_threshold=100,
     ):
         """Args:
             coverage_bw_pos: Path to the positive-strand BigWig file.
             coverage_bw_neg: Path to the negative-strand BigWig file.
-            bam_file: Optional BAM file; required only for
-                calculate_segment_expression_stats.
             f_stat_threshold: Default minimum F-statistic for run().
         """
         self.coverage_bw_pos = coverage_bw_pos
         self.coverage_bw_neg = coverage_bw_neg
-        self.bam_file = bam_file
         self.f_stat_threshold = f_stat_threshold
 
     def calculate_coverage_metrics(self, subsegments_df, n_threads=1):
@@ -721,120 +715,6 @@ class CalculateCoverages:
         ]
         return usage_df[cols]
 
-    def calculate_segment_expression_stats(self, usage_df, subsegments_df):
-        """Compute per-segment RPM and median coverage, merge onto usage_df.
-
-        Adds four columns: rpm (reads/segment length from BAM), rpm_rank,
-        median_cov (BigWig), median_rank. Dense rank, 1 = highest.
-
-        Args:
-            usage_df: Per-PAS DataFrame from evaluate_pas_usage_models.
-            subsegments_df: Sub-segment table to derive segment boundaries.
-
-        Returns:
-            usage_df merged with rpm, rpm_rank, median_cov, median_rank.
-
-        Raises:
-            ValueError: If self.bam_file is not set.
-        """
-        # 1) Build segment metadata from the subsegments DataFrame.
-        # subsegments_df already carries segment_id and gene_id directly.
-        seg_meta = subsegments_df.groupby("segment_id", as_index=False).agg(
-            chrom=("chrom", "first"),
-            strand=("strand", "first"),
-            start=("start", "min"),
-            end=("end", "max"),
-        )
-
-        # 2) Count reads per segment via pysam.
-        # Sort by (chrom, start) so bam.count() accesses the BAM index
-        # in roughly sequential order, avoiding random seeks across the
-        # file.  The original row order is restored after counting via
-        # the reset index saved before sorting.
-        if not self.bam_file:
-            raise ValueError("BAM file is required to compute RPM.")
-        seg_meta = (
-            seg_meta.reset_index(drop=True)
-            .sort_values(["chrom", "start"])
-            .reset_index(drop=True)
-        )
-        bam = pysam.AlignmentFile(self.bam_file, "rb")
-        read_counts = []
-        for row in seg_meta.itertuples(index=False):
-            count = bam.count(
-                contig=row.chrom,
-                start=int(row.start),
-                end=int(row.end),
-            )
-            read_counts.append(count)
-        bam.close()
-
-        seg_meta["read_count"] = read_counts
-
-        # 3) Compute rpm and median coverage from BigWig
-        bw_pos = pyBigWig.open(self.coverage_bw_pos)
-        bw_neg = pyBigWig.open(self.coverage_bw_neg)
-
-        def _get_median_cov(r):
-            bw = bw_pos if r["strand"] == "+" else bw_neg
-            vals = bw.values(
-                r["chrom"], int(r["start"]), int(r["end"]), numpy=True
-            )
-            return float(np.nanmedian(np.nan_to_num(vals, nan=0.0)))
-
-        seg_meta["segment_length"] = seg_meta["end"] - seg_meta["start"]
-        seg_meta["rpm"] = seg_meta["read_count"] / seg_meta["segment_length"]
-        seg_meta["median_cov"] = seg_meta.apply(_get_median_cov, axis=1)
-
-        bw_pos.close()
-        bw_neg.close()
-
-        # 4) Dense ranking (highest value → rank 1)
-        seg_meta["rpm_rank"] = (
-            seg_meta["rpm"].rank(method="dense", ascending=False).astype(int)
-        )
-        seg_meta["median_rank"] = (
-            seg_meta["median_cov"]
-            .rank(method="dense", ascending=False)
-            .astype(int)
-        )
-
-        # 5) Merge back onto the PAS-level usage_df
-        merged = usage_df.merge(
-            seg_meta[
-                [
-                    "segment_id",
-                    "rpm",
-                    "rpm_rank",
-                    "median_cov",
-                    "median_rank",
-                ]
-            ],
-            on="segment_id",
-            how="left",
-        )
-
-        # 6) Enforce column order
-        cols = [
-            "gene_id",
-            "segment_id",
-            "subsegment_id",
-            "pas_id",
-            "mean_cov",
-            "sum_squared_values",
-            "rna_drop_cov",
-            "rna_sum_drop_cov",
-            "rna_monotone",
-            "rna_usage",
-            "f_stat",
-            "p_value",
-            "rpm",
-            "rpm_rank",
-            "median_cov",
-            "median_rank",
-        ]
-        return merged[cols]
-
     def run(
         self,
         subsegments_df,
@@ -846,10 +726,9 @@ class CalculateCoverages:
     ):
         """Run the full coverage and PAS usage pipeline.
 
-        Computes coverage metrics, evaluates PAS usage models, and
-        optionally computes BAM expression stats. Returns a slimmed
-        coverage table (coverage arrays dropped) alongside the usage
-        DataFrame.
+        Computes coverage metrics and evaluates PAS usage models. Returns
+        a slimmed coverage table (coverage arrays dropped) alongside the
+        usage DataFrame.
 
         Args:
             subsegments_df: Sub-segment coordinate table.
@@ -892,13 +771,6 @@ class CalculateCoverages:
         # writing).  Drop the array column before freeing the full frame.
         raw_cov_slim = raw_cov_df.drop(columns=["coverage"], errors="ignore")
         del raw_cov_df
-
-        # Step 3: per-segment expression stats (if BAM provided)
-        if self.bam_file:
-            logger.info("Step 3: Computing per-segment expression stats...")
-            refined_usage_df = self.calculate_segment_expression_stats(
-                refined_usage_df, subsegments_df
-            )
 
         end_time = time.time()
         logger.info("PAS usage evaluation complete.")

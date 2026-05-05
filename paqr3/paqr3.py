@@ -152,7 +152,6 @@ class PAQR3:
         downstream_exon_extension: int,
         merge_distance: int,
         max_pas_count: int,
-        bam_file: str | None = None,
         f_stat_threshold: int = 100,
         posterior_usage_weight: float = 0.1,
         n_threads: int = 1,
@@ -168,7 +167,6 @@ class PAQR3:
         self.downstream_exon_extension = downstream_exon_extension
         self.merge_distance = merge_distance
         self.max_pas_count = max_pas_count
-        self.bam_file = bam_file
         self.f_stat_threshold = f_stat_threshold
         self.posterior_usage_weight = posterior_usage_weight
         self.n_threads = n_threads
@@ -314,7 +312,6 @@ class PAQR3:
         cc = CalculateCoverages(
             self.coverage_bw_pos,
             self.coverage_bw_neg,
-            bam_file=self.bam_file,
             f_stat_threshold=self.f_stat_threshold,
         )
         raw_cov_df, usage_df = cc.run(
@@ -589,7 +586,6 @@ class PAQR3:
         cc = CalculateCoverages(
             self.coverage_bw_pos,
             self.coverage_bw_neg,
-            bam_file=self.bam_file,
             f_stat_threshold=self.f_stat_threshold,
         )
         raw_cov_df, usage_df = cc.run(

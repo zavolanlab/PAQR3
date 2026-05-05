@@ -155,12 +155,6 @@ def _add_quant_args(p: argparse.ArgumentParser) -> None:
         help="Skip segments with more PAS than this (default: 10).",
     )
     p.add_argument(
-        "--bam",
-        "-b",
-        default=None,
-        help="Path to the aligned BAM file for expression rank statistics (optional).",
-    )
-    p.add_argument(
         "--f-stat-threshold",
         "-fst",
         type=int,
@@ -261,7 +255,6 @@ def _run_quant(args: argparse.Namespace) -> None:
         downstream_exon_extension=0,
         merge_distance=0,
         max_pas_count=args.max_pas_count,
-        bam_file=args.bam,
         f_stat_threshold=args.f_stat_threshold,
         posterior_usage_weight=args.posterior_usage_weight,
         n_threads=args.threads,
@@ -290,7 +283,6 @@ def _run_full(args: argparse.Namespace) -> None:
         downstream_exon_extension=args.downstream_exon_extension,
         merge_distance=args.merge_distance,
         max_pas_count=args.max_pas_count,
-        bam_file=args.bam,
         f_stat_threshold=args.f_stat_threshold,
         posterior_usage_weight=args.posterior_usage_weight,
         n_threads=args.threads,
