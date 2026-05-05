@@ -52,7 +52,6 @@ _EMIT_CHOICES = [
     "atlas",
     "all",
     "debug",
-    "segment_info",
 ]
 
 
@@ -86,8 +85,8 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
             " 'atlas' → atlas_rpm.bw + atlas_usage.bw;"
             " 'mean_cov' → mean_cov.bw (subsegment-level);"
             " 'all' → all four BigWig groups;"
-            " 'debug' → all + segment_info + JSON + debug BEDs."
-            " Default: none (only posterior_usage.tsv[.gz] is written)."
+            " 'debug' → all BigWigs + JSON + debug BEDs."
+            " Default: none (only the three results TSVs are written)."
         ),
     )
     p.add_argument(
@@ -247,7 +246,7 @@ def _run_segment(args: argparse.Namespace) -> None:
         merge_distance=args.merge_distance,
         max_pas_count=0,
         emit=args.emit,
-        gzip=args.gzip,
+        use_gzip=args.gzip,
     )
     paqr3.run_segment()
 
@@ -275,7 +274,7 @@ def _run_quant(args: argparse.Namespace) -> None:
         n_threads=args.threads,
         emit=args.emit,
         chr_sizes_file=args.chr_sizes,
-        gzip=args.gzip,
+        use_gzip=args.gzip,
     )
     paqr3.run_quant(args.segments_tsv, sample_name=args.sample_id)
 
@@ -304,7 +303,7 @@ def _run_full(args: argparse.Namespace) -> None:
         n_threads=args.threads,
         emit=args.emit,
         chr_sizes_file=args.chr_sizes,
-        gzip=args.gzip,
+        use_gzip=args.gzip,
     )
     paqr3.run_full(sample_name=args.sample_id)
 

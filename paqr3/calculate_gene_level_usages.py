@@ -2,53 +2,28 @@ import pandas as pd  # type: ignore
 
 
 class CalculateGeneLevelUsage:
-    """
-    Aggregate PAS-level posterior relative usage to gene-level usage.
+    """Compute each PAS's share of total gene-level posterior expression.
 
-    For each gene:
-      - Multiply PAS posterior_rel_usage by its RNA-seq drop coverage (rna_drop_cov)
-      - Sum this product over the gene
-      - Normalize by total rna_drop_cov per gene
+    For each PAS: ``gene_level_usage = posterior_rpm / sum(posterior_rpm
+    across all PAS in the same gene)``.  For a single-segment gene this is
+    identical to ``posterior_rel_usage``; for multi-segment genes it correctly
+    weights each segment's expression level when comparing PAS across segments.
 
-    Output: gene_id, gene_weighted_usage (float between 0-1)
+    Returns a DataFrame with columns ``subsegment_id`` and
+    ``gene_level_usage``.
     """
 
     def __init__(self, posterior_df: pd.DataFrame):
         self.posterior_df = posterior_df.copy()
 
     def compute(self) -> pd.DataFrame:
-        df = self.posterior_df.copy()
-
-        # Ensure numeric and non-null values
-        df = df[
-            df[["gene_id", "rna_drop_cov", "posterior_rel_usage"]]
-            .notnull()
-            .all(axis=1)
+        df = self.posterior_df[
+            ["gene_id", "subsegment_id", "posterior_rpm"]
         ].copy()
 
-        # Multiply posterior usage by drop coverage
-        df["weighted_usage"] = df["posterior_rel_usage"] * df["rna_drop_cov"]
-
-        # Group by gene_id and compute totals
-        gene_df = (
-            df.groupby("gene_id")
-            .agg(
-                total_weighted_usage=("weighted_usage", "sum"),
-                total_drop_cov=("rna_drop_cov", "sum"),
-            )
-            .reset_index()
+        gene_total = df.groupby("gene_id")["posterior_rpm"].transform("sum")
+        df["gene_level_usage"] = (
+            df["posterior_rpm"].div(gene_total).fillna(0.0)
         )
 
-        # Compute gene-level weighted usage
-        gene_df["gene_weighted_usage"] = gene_df.apply(
-            lambda row: (
-                row["total_weighted_usage"] / row["total_drop_cov"]
-                if row["total_drop_cov"] > 0
-                else 0.0
-            ),
-            axis=1,
-        )
-
-        # Keep only final output columns
-        result = gene_df[["gene_id", "gene_weighted_usage"]].copy()
-        return result
+        return df[["subsegment_id", "gene_level_usage"]]

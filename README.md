@@ -10,7 +10,7 @@ It processes annotation files (GTF), PAS atlases (BED), and coverage data (BED) 
 ### Using conda (recommended)
 
 ```bash
-conda create -f install/environment.yml
+conda env create -f install/environment.yml
 conda activate paqr3
 ```
 
@@ -25,7 +25,7 @@ PAQR3 exposes three sub-commands with higly customizable parameters.
 
 Parses the GTF annotation, extends terminal exons, merges nearby PAS sites, and writes a segments TSV used as input for `paqr3 quant`.
 
-```bash
+```
 paqr3 segment \
   --annotation/-a                   GTF annotation file (required) \
   --pas-atlas/-pa                   PAS atlas BED file (required) \
@@ -39,7 +39,7 @@ paqr3 segment \
 
 ### `paqr3 quant` — quantification from an existing segments TSV
 
-```bash
+```
 paqr3 quant \
   --segments-tsv/-s                 Segments TSV from paqr3 segment (required) \
   --coverage-pos/-c-pos             Positive-strand coverage BigWig (required) \
@@ -61,7 +61,7 @@ paqr3 quant \
 
 Accepts all arguments from both `segment` and `quant` (except `--segments-tsv`).
 
-```bash
+```
 paqr3 full \
   --annotation/-a  --pas-atlas/-pa \
   --coverage-pos/-c-pos  --coverage-neg/-c-neg \
@@ -72,15 +72,14 @@ paqr3 full \
 
 The `--emit` flag controls which additional outputs are written. Multiple modes can be combined.
 
-| Token | BigWig files written |
+| Token | Files written |
 |---|---|
 | `mean_cov` | `{sample}_mean_cov.bw` — mean coverage per subsegment |
 | `observed` | `{sample}_observed_usage.bw` + `{sample}_observed_rpm.bw` |
 | `posterior` | `{sample}_posterior_rpm.bw` + `{sample}_posterior_usage.bw` |
 | `atlas` | `{sample}_atlas_rpm.bw` + `{sample}_atlas_usage.bw` |
 | `all` | All four BigWig groups above |
-| `segment_info` | `{sample}_segment_info.tsv[.gz]` — per-segment F-stat summary |
-| `debug` | All of the above + debug JSON + four debug BED files |
+| `debug` | All BigWigs + debug JSON + four debug BED files |
 
 BigWig emission requires `--chr-sizes`.
 
@@ -101,9 +100,10 @@ Outputs are written to `{output-dir}/{sample}_results/`:
 
 | File | Description |
 |---|---|
-| `{sample}_posterior_usage.tsv[.gz]` | Primary output. One row per PAS. Columns: `subsegment_id`, `pas_id`, `mean_cov`, `rna_drop_cov`, `rna_usage`, `atlas_rpm`, `observed_rpm`, `posterior_rpm`, `posterior_rel_usage`, `atlas_rel_usage`, `gene_weighted_usage`. |
-| `{sample}_segment_info.tsv[.gz]` | Per-segment F-statistic summary (`gene_id`, `segment_id`, `rna_sum_drop_cov`, `f_stat`, `p_value`). Written when `--emit segment_info` or `debug`. |
-| `{sample}_mean_cov.bw` | Mean RNA-seq coverage per subsegment (all subsegments). Written when `--emit mean_cov`, `all`, or `debug`. |
+| `{sample}_segment_results.tsv[.gz]` | One row per evaluated segment. Columns: `chr`, `start`, `end`, `strand`, `segment_id`, `rna_sum_drop_cov`, `f_stat`, `p_value`. |
+| `{sample}_subsegment_results.tsv[.gz]` | One row per subsegment (including trailing). Columns: `chr`, `start`, `end`, `strand`, `subsegment_id`, `pas_id`, `mean_cov`, `atlas_rpm`, `observed_rpm`, `posterior_rpm`. |
+| `{sample}_pas_results.tsv[.gz]` | One row per PAS. Columns: `chr`, `start`, `end`, `strand`, `pas_id`, `subsegment_id`, `atlas_usage`, `observed_usage`, `posterior_usage`, `gene_level_usage`. |
+| `{sample}_mean_cov.bw` | Mean RNA-seq coverage per subsegment. Written when `--emit mean_cov`, `all`, or `debug`. |
 | `{sample}_observed_usage.bw` | F-stat derived PAS usage fraction, at PAS cluster coordinates. |
 | `{sample}_observed_rpm.bw` | Observed coverage-drop RPM per PAS. |
 | `{sample}_posterior_rpm.bw` | Posterior blended RPM per PAS. |
