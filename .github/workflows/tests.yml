@@ -24,9 +24,6 @@ jobs:
           activate-environment: paqr3
           auto-activate-base: false
 
-      - name: Install package
-        run: pip install -e . --no-deps
-
       - name: Lint (flake8)
         run: flake8 paqr3/
 
