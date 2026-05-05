@@ -1,12 +1,4 @@
-"""Construct genomic segments and sub-segments for PAQR3 analysis.
-
-This module defines :class:`ConstructSegments`, which parses a GTF
-annotation file into gene/transcript/region objects, extends gene and
-terminal-exon coordinates downstream, splits genes into non-overlapping
-segments at exon/intron boundaries, overlaps those segments with a
-poly-A site (PAS) atlas, and writes the resulting BED-format output
-files.
-"""
+"""Construct genomic segments and sub-segments for PAQR3 analysis."""
 
 import bisect
 import logging
@@ -38,31 +30,20 @@ _EXON_SKIP_COLS: frozenset[str] = _TX_SKIP_COLS | {"transcript_id"}
 
 
 class ConstructSegments:
-    """Pipeline for constructing genomic segments from a GTF annotation.
+    """Build genomic segments and sub-segments from a GTF annotation.
 
-    The pipeline reads a GTF annotation and a poly-A site (PAS) atlas,
-    then:
-
-    1. Parses genes, transcripts, and exons into
-       :class:`~paqr3.models.Gene` objects.
-    2. Extends gene boundaries and terminal exons downstream by a fixed
-       number of bases.
-    3. Splits each gene into non-overlapping segments at exon/intron
-       boundaries.
-    4. Overlaps segments with merged PAS sites to define sub-segments.
-    5. Writes BED-format output files for downstream analysis.
+    Parses a GTF into Gene objects, extends terminal exons, splits genes
+    into non-overlapping segments, and intersects with a PAS atlas to
+    define sub-segments.
 
     Attributes:
-        annotation_file: Path to the input GTF annotation file.
+        annotation_file: Path to the GTF annotation file.
         pas_atlas_file: Path to the PAS atlas BED file.
-        downstream_exon_extension: Number of bases to extend terminal
-            exons and gene boundaries downstream.
-        genes: Mapping from gene ID to :class:`~paqr3.models.Gene`
-            after parsing.
-        gene_mapping: Mapping from original gene ID to integer unique
-            gene ID used in output files.
-        pas_df: DataFrame of merged PAS sites produced by
-            :meth:`process_pas_atlas`.
+        downstream_exon_extension: Bases to extend terminal exons and
+            gene boundaries downstream.
+        genes: Mapping from gene ID to Gene after parsing.
+        gene_mapping: Original gene ID to integer unique gene ID.
+        pas_df: DataFrame of merged PAS sites from process_pas_atlas().
     """
 
     def __init__(
@@ -71,13 +52,11 @@ class ConstructSegments:
         pas_atlas_file: str,
         downstream_exon_extension: int,
     ) -> None:
-        """Initialise the pipeline with input files and extension distance.
-
-        Args:
+        """Args:
             annotation_file: Path to the GTF annotation file.
             pas_atlas_file: Path to the PAS atlas BED file.
-            downstream_exon_extension: Number of bases to extend
-                terminal exons and gene boundaries in the 3′ direction.
+            downstream_exon_extension: Bases to extend terminal exons
+                and gene boundaries in the 3′ direction.
         """
         self.annotation_file = annotation_file
         self.pas_atlas_file = pas_atlas_file
@@ -91,19 +70,7 @@ class ConstructSegments:
     # ------------------------------------------------------------------
 
     def _gene_extent(self, gene: Gene) -> tuple[int, int]:
-        """Return the (start, end) span of all regions in *gene*.
-
-        Computes the minimum start and maximum end across every region
-        of every transcript. The gene must have at least one transcript
-        with at least one region.
-
-        Args:
-            gene: A Gene with at least one region across its
-                transcripts.
-
-        Returns:
-            A tuple ``(min_start, max_end)`` over all regions.
-        """
+        """Return (min_start, max_end) across all regions of gene."""
         starts = [
             r.start for t in gene.transcripts.values() for r in t.regions
         ]
@@ -111,29 +78,14 @@ class ConstructSegments:
         return min(starts), max(ends)
 
     def _gene_chrom(self, gene: Gene) -> str | None:
-        """Return the chromosome of the first region in *gene*.
-
-        Args:
-            gene: A Gene object.
-
-        Returns:
-            Chromosome name, or ``None`` if the gene has no regions.
-        """
+        """Return the chromosome of the first region in gene, or None."""
         return next(
             (r.chrom for t in gene.transcripts.values() for r in t.regions),
             None,
         )
 
     def _gene_strand(self, gene: Gene) -> str | None:
-        """Return the strand of the first transcript in *gene*.
-
-        Args:
-            gene: A Gene object.
-
-        Returns:
-            ``"+"`` or ``"-"``, or ``None`` if the gene has no
-            transcripts.
-        """
+        """Return the strand of the first transcript in gene, or None."""
         return next(
             (t.strand for t in gene.transcripts.values()),
             None,
@@ -144,27 +96,18 @@ class ConstructSegments:
     # ------------------------------------------------------------------
 
     def parse_gtf_to_genes(self, gtf_data: pd.DataFrame) -> dict[str, Gene]:
-        """Parse a GTF DataFrame into a mapping of gene ID to Gene.
+        """Parse a GTF DataFrame into a gene_id → Gene mapping.
 
-        Rows are grouped by feature type (``"gene"``,
-        ``"transcript"``, ``"exon"``) up front, then each group is
-        iterated with :meth:`~pandas.DataFrame.itertuples` rather than
-        :meth:`~pandas.DataFrame.iterrows`.  This avoids constructing a
-        full ``Series`` per row and gives a 3–5× speed improvement.
-
-        Processing order is always gene → transcript → exon, regardless
-        of the order features appear in the file, making the parser
-        more robust to non-standard GTF orderings.
+        Processes features in gene → transcript → exon order regardless
+        of file ordering.
 
         Args:
-            gtf_data: A DataFrame produced by ``gtfparse.read_gtf``,
-                with at minimum the columns ``seqname``, ``source``,
-                ``feature``, ``start``, ``end``, ``score``,
-                ``strand``, ``gene_id``, and ``transcript_id``.
+            gtf_data: DataFrame from gtfparse.read_gtf with at minimum
+                seqname, source, feature, start, end, score, strand,
+                gene_id, and transcript_id columns.
 
         Returns:
-            A dict mapping ``gene_id`` to the corresponding
-            :class:`~paqr3.models.Gene` object.
+            Dict mapping gene_id to Gene.
         """
         feature_groups = {k: v for k, v in gtf_data.groupby("feature")}
         gene_rows = feature_groups.get("gene", pd.DataFrame())
@@ -224,23 +167,10 @@ class ConstructSegments:
         return genes
 
     def extend_gene_coordinates(self) -> None:
-        """Extend each gene boundary downstream by the configured offset.
+        """Extend each gene boundary downstream, capped at the nearest gene.
 
-        For ``+``-strand genes the right (3′) boundary is extended; for
-        ``-``-strand genes the left (3′) boundary is extended.
-        Extension is capped so that it never overlaps the nearest
-        downstream gene on the same chromosome and strand.
-
-        **Complexity improvement** — the original implementation used a
-        nested loop that scanned all remaining genes for each gene,
-        giving O(n²) comparisons.  This method instead builds a
-        per-``(chrom, strand)`` sorted list of ``(start, Gene)`` pairs
-        once, then uses :func:`bisect.bisect_right` and
-        :func:`bisect.bisect_left` to locate the neighbouring gene in
-        O(log n) per query, reducing overall complexity to O(n log n).
-
-        Updated ``"start"`` and ``"end"`` values are written into
-        ``gene.attributes`` for use by downstream steps.
+        Uses bisect for O(n log n) neighbour lookup. Updated start/end
+        values are written into gene.attributes.
         """
         sorted_genes = sorted(
             self.genes.values(),
@@ -313,10 +243,7 @@ class ConstructSegments:
     def extend_exon_downstream(self) -> None:
         """Extend the terminal exon of each transcript downstream.
 
-        For ``+``-strand transcripts the rightmost exon's end is
-        extended; for ``-``-strand transcripts the leftmost exon's
-        start is extended.  Extension is capped at the gene boundary
-        set by :meth:`extend_gene_coordinates`.
+        Capped at the gene boundary set by extend_gene_coordinates().
         """
         for gene in self.genes.values():
             gene_strand = self._gene_strand(gene)
@@ -374,13 +301,10 @@ class ConstructSegments:
                         )
 
     def define_exons_introns(self) -> None:
-        """Build intron regions and mark terminal exons for all transcripts.
+        """Infer intron regions and mark terminal exons for all transcripts.
 
-        For each transcript, introns are inferred as the gaps between
-        consecutive exons.  The terminal exon (3′-most relative to
-        strand) is flagged with ``"is_terminal_exon": True`` in its
-        attributes.  The transcript's region list is replaced with the
-        combined and position-sorted list of exons and introns.
+        Introns are gaps between consecutive exons. The 3′-most exon per
+        transcript gets is_terminal_exon=True in its attributes.
         """
         for gene in self.genes.values():
             for transcript in gene.transcripts.values():
@@ -430,19 +354,11 @@ class ConstructSegments:
     def construct_segments(self) -> None:
         """Split each gene into non-overlapping genomic segments.
 
-        Segment boundaries are placed at every exon/intron start and
-        end coordinate within the gene.  Boundaries that fall inside a
-        terminal exon (but not at the gene boundary) are suppressed to
-        avoid splitting the terminal-exon region.
-
-        Each resulting segment is annotated with:
-
-        - ``"segment_number"``: 1-based index along the transcript
-          direction.
-        - ``"segment_origin"``: ``"IN"`` (intronic), ``"TE"``
-          (terminal-exon), or ``"EX"`` (internal exon).
-
-        Segments are stored in ``gene.segments``.
+        Boundaries inside terminal exons (except at the gene boundary)
+        are suppressed to keep the terminal-exon region intact.
+        Each segment gets a segment_number (1-based) and segment_origin
+        ("IN", "TE", or "EX") in its attributes. Results stored in
+        gene.segments.
         """
         for gene in self.genes.values():
             strand = self._gene_strand(gene)
@@ -566,30 +482,16 @@ class ConstructSegments:
     ) -> dict[tuple[str, str], IntervalTree]:
         """Read and merge the PAS atlas, then build interval trees.
 
-        PAS sites on the same chromosome and strand that are within
-        *merge_distance* bases of each other are merged into a single
-        cluster.  For each cluster, the mean RPM across constituent
-        sites is stored and the site with the highest RPM is chosen as
-        the representative cleavage site (``rep_cs``).
-
-        Results are stored in ``self.pas_df`` and also returned as a
-        nested interval-tree structure for fast overlap queries.
-
-        The PAS BED file is sorted by ``(chrom, strand, start)`` before
-        merging; the merge loop relies on this order being strictly
-        maintained.  RPM values are read from column index
-        ``_PAS_RPM_COL`` (0-based); a warning is emitted and the value
-        defaults to ``0.0`` when that column is absent.
+        Sites within merge_distance on the same chrom/strand are merged
+        into a cluster; the cluster stores the mean RPM and the
+        highest-RPM site as rep_cs. Results are stored in self.pas_df.
 
         Args:
-            merge_distance: Maximum gap (in bp) between two PAS sites
-                that are still merged into the same cluster.
+            merge_distance: Max gap in bp between sites to merge.
 
         Returns:
-            A dict mapping ``(chrom, strand)`` to an
-            :class:`~intervaltree.IntervalTree` of merged PAS
-            intervals.  Each interval's ``data`` attribute holds the
-            integer ``pas_id``.
+            Dict mapping (chrom, strand) to an IntervalTree of merged
+            PAS intervals; each interval's data is the integer pas_id.
         """
         logger.info("Reading PAS atlas...")
         pas_bed = BedTool(self.pas_atlas_file)
@@ -747,19 +649,14 @@ class ConstructSegments:
     ) -> None:
         """Overlap segments with PAS sites and build sub-segments.
 
-        For each segment, PAS intervals fully contained within the
-        segment are identified.  The segment is then split into
-        sub-segments at the PAS boundaries: each sub-segment preceding
-        a PAS receives that PAS's ID, and the final tail sub-segment
-        receives ``"."``.  On the ``"-"`` strand, sub-segment order is
-        reversed to follow transcript direction.
-
-        Sub-segments are stored in ``segment.subsegments``.
+        Splits each segment at PAS boundaries; each sub-segment gets
+        the ID of the PAS it precedes, with "." for the trailing piece.
+        Sub-segment order follows transcript direction. Results stored
+        in segment.subsegments.
 
         Args:
-            pas_trees: Interval trees returned by
-                :meth:`process_pas_atlas`, keyed by
-                ``(chrom, strand)``.
+            pas_trees: Interval trees from process_pas_atlas, keyed by
+                (chrom, strand).
         """
         logger.info(
             "Identifying PAS overlaps with segments and "
@@ -860,17 +757,15 @@ class ConstructSegments:
                 segment.subsegments = subsegments
 
     def _assign_segment_ids(self) -> dict[tuple[str, int], str]:
-        """Map (gene_id, segment_number) to a human-readable segment ID.
+        """Map (gene_id, segment_number) to a segment ID string.
 
-        Segment IDs take the form ``{gene_id}:{prefix}{index:03d}``
-        where *prefix* is ``E`` (exon), ``I`` (intron), or ``T``
-        (terminal exon), and *index* is a 1-based per-type counter
-        within the gene.  Segments are processed in
-        ``segment_number`` order so numbering is stable.
+        IDs take the form {gene_id}:{prefix}{index:03d} where prefix is
+        E (exon), I (intron), or T (terminal exon), and index is a
+        1-based per-type counter within the gene.
 
         Returns:
-            Dict mapping ``(gene_id, segment_number)`` to a segment
-            ID string such as ``"ENSG00000186092.1:T001"``.
+            Dict mapping (gene_id, segment_number) to a segment ID
+            like "ENSG00000186092.1:T001".
         """
         seg_id_map: dict[tuple[str, int], str] = {}
         for gene in self.genes.values():
@@ -894,48 +789,17 @@ class ConstructSegments:
         out_tsv: str | None = None,
         out_debug_prefix: str | None = None,
     ) -> None:
-        """Write the segments TSV (and optionally four debug BED files).
+        """Write the segments TSV and optionally debug BED files.
 
-        The TSV is the primary output of the segmentation stage and
-        the required input for ``paqr3 quant``.  It contains one row
-        per sub-segment belonging to a segment with at least one
-        overlapping PAS; segments with no PAS overlap are omitted.
-
-        TSV columns (tab-separated, with header):
-
-        - ``chrom``, ``start``, ``end``: 0-based half-open genomic
-          coordinates.
-        - ``subsegment_id``: ``{gene_id}:{TypeNNN}:{sub:03d}``
-          — *Type* is ``E`` / ``I`` / ``T``, *NNN* is the per-type
-          segment counter within the gene, *sub* is the 1-based
-          sub-segment index within the segment.
-        - ``strand``: ``"+"`` or ``"-"``.
-        - ``overlapping_pas_id``: representative cleavage-site
-          coordinate of the PAS that terminates this sub-segment
-          (e.g. ``chr1:65435``), or ``"."`` for the trailing
-          sub-segment.
-        - ``atlas_rpm``: mean RPM of the merged PAS cluster; ``0.0``
-          for trailing sub-segments.
-        - ``pas_start``, ``pas_end``: 0-based half-open coordinates of
-          the merged PAS cluster; ``NaN`` for trailing sub-segments.
-
-        If *out_debug_prefix* is given, four headerless five-column BED
-        files are written (one per category):
-
-        - ``{prefix}_genes.bed``
-        - ``{prefix}_segments.bed``
-        - ``{prefix}_subsegments.bed``
-        - ``{prefix}_pas.bed``
-
-        Each file has columns: chrom, start, end, id, strand.  PAS
-        entries appear at most once per unique representative CS.
+        One row per sub-segment in segments with at least one PAS;
+        segments without PAS overlap are omitted. If out_debug_prefix
+        is given, four headerless BED files are written for genes,
+        segments, subsegments, and PAS sites.
 
         Args:
-            out_tsv: Output path for the segments TSV file.  Pass
-                ``None`` to skip writing the TSV (only debug BEDs
-                are written when *out_debug_prefix* is set).
-            out_debug_prefix: Optional path prefix for the debug BED
-                files (no extension; category suffix is appended).
+            out_tsv: Output path for the TSV; pass None to skip.
+            out_debug_prefix: Path prefix for debug BEDs (no extension;
+                category suffix appended automatically).
         """
         assert self.pas_df is not None, (
             "process_pas_atlas() must be called before "
@@ -1103,22 +967,10 @@ class ConstructSegments:
     ) -> None:
         """Write genes, segments, sub-segments, and PAS to BED files.
 
-        Output format (all tab-separated, no header):
-
-        - *out_genes_bed*: chrom, start, end, unique_gene_id,
-          gene_id, strand.
-        - *out_segments_bed*: chrom, start, end, gene_segment_id,
-          overlapping_pas, strand, segment_origin.
-        - *out_subsegments_bed*: chrom, start, end,
-          gene_segment_subsegment_id, pas_id, strand,
-          segment_origin.
-        - *out_pas_bed*: chrom, start, end, pas_id, rep_cs, strand.
-
         Args:
             out_genes_bed: Output path for the genes BED file.
             out_segments_bed: Output path for the segments BED file.
-            out_subsegments_bed: Output path for the sub-segments BED
-                file.
+            out_subsegments_bed: Output path for the sub-segments BED.
             out_pas_bed: Output path for the merged PAS BED file.
         """
         gene_mapping: dict[str, int] = {}
@@ -1225,20 +1077,15 @@ class ConstructSegments:
         self.gene_mapping = gene_mapping
 
     def create_subsegments_dataframe(self) -> pd.DataFrame:
-        """Build a DataFrame of all sub-segments for coverage calculations.
+        """Build a flat DataFrame of all sub-segments.
 
-        Iterates over ``gene.segments`` and collects every sub-segment
-        with a non-zero length into a flat table using the same
-        human-readable ID scheme as :meth:`create_segments_tsv`.
-
-        ``pas_id`` is set to the representative cleavage-site string
-        (e.g. ``"chr1:65435"``) for sub-segments that terminate at a
-        PAS, and ``"."`` for trailing sub-segments.
+        Collects non-zero-length sub-segments with human-readable IDs.
+        pas_id is the rep_cs string for PAS-terminating sub-segments,
+        or "." for trailing ones.
 
         Returns:
-            A DataFrame with columns ``gene_id``, ``segment_id``,
-            ``subsegment_id``, ``chrom``, ``start``, ``end``,
-            ``strand``, ``pas_id``.
+            DataFrame with columns gene_id, segment_id, subsegment_id,
+            chrom, start, end, strand, pas_id.
         """
         assert self.pas_df is not None, (
             "process_pas_atlas() must be called before "
@@ -1284,26 +1131,14 @@ class ConstructSegments:
         return pd.DataFrame(rows)
 
     def compute(self, merge_distance: int = 5) -> None:
-        """Execute all in-memory segmentation steps.
+        """Run all in-memory segmentation steps without writing files.
 
-        Runs the complete pipeline through to sub-segment construction
-        without writing any output files.  Call this before
-        :meth:`create_segments_tsv` or
-        :meth:`create_subsegments_dataframe`.
-
-        Steps, in order:
-
-        1. Read and parse the GTF annotation.
-        2. Extend gene coordinate boundaries downstream.
-        3. Extend terminal exons downstream.
-        4. Infer intron regions and mark terminal exons.
-        5. Construct non-overlapping segments per gene.
-        6. Read and merge the PAS atlas.
-        7. Identify PAS within segments and build sub-segments.
+        Call this before create_segments_tsv or
+        create_subsegments_dataframe.
 
         Args:
-            merge_distance: Maximum gap (in bp) for merging adjacent
-                PAS sites in the atlas.
+            merge_distance: Max gap in bp for merging adjacent PAS
+                sites in the atlas.
         """
         logger.info("Reading annotation GTF...")
         gtf_data = read_gtf(self.annotation_file, result_type="pandas")
@@ -1341,18 +1176,13 @@ class ConstructSegments:
     ) -> None:
         """Run the full segmentation pipeline and write output files.
 
-        Calls :meth:`compute` to build all in-memory data structures,
-        then writes the segments TSV via :meth:`create_segments_tsv`.
+        Calls compute(), then writes the segments TSV if out_tsv is
+        given and debug BEDs if out_debug_prefix is given.
 
         Args:
-            out_tsv: Output path for the segments TSV.  Pass ``None``
-                to skip TSV writing (useful when the in-memory
-                DataFrame is consumed directly via
-                :meth:`create_subsegments_dataframe`).
-            merge_distance: Maximum gap (in bp) for merging adjacent
-                PAS sites in the atlas.
-            out_debug_prefix: Optional path prefix for the four debug
-                BED files (written only when provided).
+            out_tsv: Output path for the segments TSV; None to skip.
+            merge_distance: Max gap in bp for merging adjacent PAS.
+            out_debug_prefix: Path prefix for debug BED files.
         """
         self.compute(merge_distance)
         self.create_segments_tsv(out_tsv, out_debug_prefix=out_debug_prefix)

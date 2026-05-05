@@ -1,10 +1,4 @@
-"""Data models for genomic annotation objects.
-
-This module defines the core data structures used to represent genomic
-features parsed from GTF files: Region (exon or intron), Transcript,
-and Gene. Each class can serialise itself back to a GTF format string
-via ``to_gtf_format()``.
-"""
+"""Data models for genomic annotation objects (Region, Transcript, Gene)."""
 
 from __future__ import annotations
 
@@ -17,21 +11,19 @@ class Region:
     """A single genomic region (exon or intron).
 
     Attributes:
-        region_type: Feature type, either ``"exon"`` or ``"intron"``.
+        region_type: Either "exon" or "intron".
         chrom: Chromosome or contig name.
         start: 1-based start coordinate (GTF convention).
         end: 1-based end coordinate, inclusive (GTF convention).
-        strand: Strand, either ``"+"`` or ``"-"``.
+        strand: "+" or "-".
         exon_number: Exon index within the transcript, if applicable.
-        intron_number: Intron index within the transcript, if
-            applicable.
+        intron_number: Intron index within the transcript, if applicable.
         attributes: Key-value pairs from the GTF attributes field.
-            Values may be strings, integers, booleans, or ``None``.
         subsegments: Sub-segment regions nested within this region,
             populated by the segment-construction pipeline.
     """
 
-    region_type: str  # "exon" or "intron"
+    region_type: str
     chrom: str
     start: int
     end: int
@@ -42,11 +34,7 @@ class Region:
     subsegments: list[Region] = field(default_factory=list)
 
     def to_gtf_format(self) -> str:
-        """Convert the Region to a GTF format string.
-
-        Returns:
-            A tab-delimited GTF line representing this region.
-        """
+        """Return a tab-delimited GTF line for this region."""
         attr_str = (
             "; ".join(
                 [f'{key} "{value}"' for key, value in self.attributes.items()]
@@ -60,12 +48,6 @@ class Region:
         )
 
     def __str__(self) -> str:
-        """Return a human-readable string representation.
-
-        Returns:
-            A string describing the region type, coordinates, strand,
-            and attributes.
-        """
         return (
             f"Region({self.region_type}, "
             f"{self.chrom}:{self.start}-{self.end}, "
@@ -73,11 +55,6 @@ class Region:
         )
 
     def __repr__(self) -> str:
-        """Return the string representation of the Region.
-
-        Returns:
-            Same as __str__.
-        """
         return self.__str__()
 
 
@@ -87,11 +64,9 @@ class Transcript:
 
     Attributes:
         transcript_id: Unique identifier for this transcript.
-        strand: Strand, either ``"+"`` or ``"-"``.
-        regions: Ordered list of exon/intron regions belonging to this
-            transcript.
+        strand: "+" or "-".
+        regions: Ordered list of exon/intron regions.
         attributes: Key-value pairs from the GTF attributes field.
-            Values may be strings, integers, booleans, or ``None``.
     """
 
     transcript_id: str
@@ -100,21 +75,13 @@ class Transcript:
     attributes: dict[str, Any] = field(default_factory=dict)
 
     def add_region(self, region: Region) -> None:
-        """Append a Region to this transcript's region list.
-
-        Args:
-            region: The Region object to add.
-        """
+        """Append a Region to this transcript's region list."""
         self.regions.append(region)
 
     def to_gtf_format(self) -> str:
-        """Convert the Transcript to a GTF format string.
+        """Return a tab-delimited GTF line for this transcript.
 
-        The start and end coordinates are derived from the minimum and
-        maximum coordinates of all contained regions.
-
-        Returns:
-            A tab-delimited GTF line representing this transcript.
+        Coordinates are derived from the min/max of all contained regions.
         """
         attr_str = (
             "; ".join(
@@ -132,11 +99,6 @@ class Transcript:
         )
 
     def __repr__(self) -> str:
-        """Return a string representation of the Transcript.
-
-        Returns:
-            A string with the transcript ID and its regions.
-        """
         return f"Transcript: {self.transcript_id}, Regions: {self.regions}"
 
 
@@ -148,8 +110,7 @@ class Gene:
         gene_id: Unique identifier for this gene.
         transcripts: Mapping from transcript ID to Transcript object.
         attributes: Key-value pairs from the GTF attributes field.
-            Values may be strings, integers, booleans, or ``None``.
-        segments: Non-overlapping genomic segments constructed by the
+        segments: Non-overlapping genomic segments built by the
             segment-construction pipeline.
     """
 
@@ -159,22 +120,14 @@ class Gene:
     segments: list[Region] = field(default_factory=list)
 
     def add_transcript(self, transcript: Transcript) -> None:
-        """Add a Transcript to this gene, keyed by transcript ID.
-
-        Args:
-            transcript: The Transcript object to add.
-        """
+        """Add a Transcript to this gene, keyed by transcript ID."""
         self.transcripts[transcript.transcript_id] = transcript
 
     def to_gtf_format(self) -> str:
-        """Convert the Gene to a GTF format string.
+        """Return a tab-delimited GTF line for this gene.
 
-        The start and end coordinates are derived from the minimum and
-        maximum coordinates across all regions of all transcripts.
-        Strand and chromosome are taken from the first transcript.
-
-        Returns:
-            A tab-delimited GTF line representing this gene.
+        Coordinates span all regions of all transcripts; strand and
+        chromosome are taken from the first transcript.
         """
         attr_str = (
             "; ".join(
@@ -202,9 +155,4 @@ class Gene:
         )
 
     def __repr__(self) -> str:
-        """Return a string representation of the Gene.
-
-        Returns:
-            A string with the gene ID and its transcripts.
-        """
         return f"Gene: {self.gene_id}, Transcripts: {self.transcripts}"

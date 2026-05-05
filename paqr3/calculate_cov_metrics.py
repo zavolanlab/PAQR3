@@ -1,21 +1,4 @@
-"""Coverage metric calculation for PAQR3 poly-A site usage analysis.
-
-This module defines :class:`CalculateCoverages`, which reads RNA-seq
-coverage BigWig files, computes mean and sum-squared coverage per
-sub-segment, evaluates poly-A site (PAS) usage models using an F-
-statistic criterion, and writes per-PAS usage tables.
-
-Key functions and methods:
-
-- :func:`evaluate_all_pas_usage_patterns`: searches all monotone PAS
-  assignment patterns using a pruned DFS, selecting those that meet
-  an F-statistic threshold.
-- :meth:`~CalculateCoverages.calculate_coverage_metrics`: reads
-  BigWig coverage per sub-segment.
-- :meth:`~CalculateCoverages.evaluate_pas_usage_models`: parallelises
-  pattern evaluation across segments.
-- :meth:`~CalculateCoverages.run`: full pipeline entry point.
-"""
+"""Coverage metrics and PAS usage evaluation for PAQR3."""
 
 import concurrent.futures
 import json
@@ -38,20 +21,16 @@ logger = logging.getLogger(__name__)
 
 
 def json_serial(obj):
-    """JSON serialiser for NumPy scalar and array types.
-
-    Used as the ``default`` argument to :func:`json.dump` when writing
-    debug output that may contain NumPy values.
+    """JSON serialiser for NumPy types; pass as json.dump default.
 
     Args:
         obj: Object to serialise.
 
     Returns:
-        A JSON-compatible Python object (``float``, ``int``, or
-        ``list``).
+        float, int, or list.
 
     Raises:
-        TypeError: If *obj* is not a recognised NumPy type.
+        TypeError: If obj is not a recognised NumPy type.
     """
     if isinstance(obj, (np.float32, np.float64)):
         return float(obj)
@@ -69,53 +48,26 @@ def evaluate_all_pas_usage_patterns(
     max_pas_count=10,
     f_stat_threshold=100,
 ):
-    """Select PAS usage patterns satisfying monotonicity and F-stat criteria.
+    """Find PAS usage patterns satisfying monotonicity and F-stat criteria.
 
-    Searches all binary patterns that assign each PAS to a group
-    boundary, keeping only those where coverage is non-increasing
-    across groups (monotone) and whose one-way ANOVA F-statistic is at
-    least *f_stat_threshold*.  A "union" pattern is built from the OR
-    of all passing patterns, and per-PAS usage fractions are derived
-    from the resulting coverage drops.
-
-    **Performance improvements**
-
-    - *Pruned DFS* (point 14): rather than enumerating all 2^m binary
-      strings with :func:`itertools.product`, a depth-first search
-      abandons any branch the moment the current group's mean exceeds
-      the previous group's mean.  In practice most patterns are non-
-      monotone, so the majority of the search tree is pruned before
-      any F-stat is computed.
-    - *Memoised concatenation* (point 15): group concatenated-array
-      and mean values are cached by ``frozenset`` of coverage indices;
-      groups shared across different patterns are computed only once.
+    Uses a pruned DFS over binary assignment patterns, keeping those
+    where coverage is non-increasing across groups and whose F-statistic
+    meets the threshold. A union of all passing patterns determines
+    final per-PAS usage fractions.
 
     Args:
-        subsegments: List of sub-segment records, each a dict with at
-            least keys ``"coverage"`` (1-D NumPy array) and
-            ``"pas_id"`` (string; ``"."`` for non-PAS positions).
-        segment_id: Identifier used in debug log messages.
-        debug: If ``True``, emit detailed per-pattern log messages.
-        max_pas_count: Maximum number of unique PAS allowed; segments
-            with more are skipped (returns ``None``).
-        f_stat_threshold: Minimum F-statistic for a pattern to be
-            retained.
+        subsegments: List of sub-segment dicts with coverage (numpy
+            array) and pas_id ("." for non-PAS) keys.
+        segment_id: Used in debug log messages.
+        debug: Emit verbose per-pattern log messages.
+        max_pas_count: Skip segments with more unique PAS than this.
+        f_stat_threshold: Minimum F-statistic to retain a pattern.
 
     Returns:
-        A result dict with keys:
-
-        - ``"pas_usage"``: ``{pas_id: usage_fraction}``
-        - ``"f_stat"``: best F-statistic across retained patterns
-        - ``"p_value"``: corresponding p-value
-        - ``"rna_drop_cov"``: coverage drop per PAS position
-        - ``"rna_sum_drop_cov"``: total coverage drop
-        - ``"rna_monotone"``: 1 if the union pattern is monotone
-        - ``"used_combos"``: list of retained patterns (tuples)
-        - ``"debug_info"``: summary string or dict
-        - ``"unique_pas_ids"``: ordered list of PAS IDs
-
-        Returns ``None`` if no pattern passes the threshold or the
-        segment should be skipped.
+        Dict with keys pas_usage, f_stat, p_value, rna_drop_cov,
+        rna_sum_drop_cov, rna_monotone, used_combos, debug_info,
+        unique_pas_ids. Returns None if no patterns pass or the
+        segment is skipped.
     """
     coverage_arrays = [s["coverage"] for s in subsegments]
     pas_ids = [str(s["pas_id"]) for s in subsegments]
@@ -413,23 +365,18 @@ def evaluate_all_pas_usage_patterns(
 
 
 def compute_drops_and_usage(group):
-    """Compute per-sub-segment coverage drops and RNA usage fractions.
+    """Compute coverage drops and RNA usage fractions for one segment.
 
-    Rows are sorted by ``subsegment_id`` before processing.  The
-    *drop* at position *i* is ``mean_cov[i] - mean_cov[i+1]``; the
-    last position always has a drop of 0.  Usage for each sub-segment
-    is that drop's share of the total drop.
+    Drop at position i is mean_cov[i] - mean_cov[i+1]; the last is 0.
+    Usage is each drop's share of the total drop.
 
     Args:
-        group: DataFrame slice for a single segment, containing at
-            minimum columns ``subsegment_id``, ``mean_cov``,
-            ``pas_id``.
+        group: DataFrame slice for one segment with subsegment_id,
+            mean_cov, and pas_id columns.
 
     Returns:
-        The input DataFrame augmented with columns ``rna_drop_cov``,
-        ``rna_sum_drop_cov``, ``rna_monotone``, and ``rna_usage``.
-        Sub-segments whose ``pas_id`` is ``"."`` receive
-        ``rna_usage = None``.
+        Input DataFrame with added columns rna_drop_cov,
+        rna_sum_drop_cov, rna_monotone, rna_usage (None for ".").
     """
     group = group.sort_values("subsegment_id")
     mean_covs = group["mean_cov"].values
@@ -461,31 +408,19 @@ def process_segment(
     max_pas_count=10,
     f_stat_threshold=100,
 ):
-    """Evaluate PAS usage patterns for a single segment.
+    """Evaluate PAS usage patterns for one segment.
 
-    Designed to be called from a
-    :class:`~concurrent.futures.ProcessPoolExecutor` worker.  Accepts
-    pre-converted sub-segment records (plain dicts with NumPy arrays)
-    rather than a :class:`~pandas.DataFrame` to avoid the significant
-    overhead of pickling a DataFrame across process boundaries.
+    Intended for ProcessPoolExecutor workers; accepts plain dicts to
+    avoid DataFrame pickling overhead.
 
     Args:
-        segment_tuple: A ``(segment_id, subsegments)`` pair where
-            *subsegments* is a list of dicts, each containing at least
-            the keys ``"coverage"``, ``"pas_id"``, ``"gene_id"``,
-            ``"segment_id"``, ``"subsegment_id"``, ``"mean_cov"``, and
-            ``"sum_squared_values"``.
-        debug: Forwarded to
-            :func:`evaluate_all_pas_usage_patterns`.
-        max_pas_count: Forwarded to
-            :func:`evaluate_all_pas_usage_patterns`.
-        f_stat_threshold: Forwarded to
-            :func:`evaluate_all_pas_usage_patterns`.
+        segment_tuple: (segment_id, subsegments) pair.
+        debug: Forwarded to evaluate_all_pas_usage_patterns.
+        max_pas_count: Forwarded to evaluate_all_pas_usage_patterns.
+        f_stat_threshold: Forwarded to evaluate_all_pas_usage_patterns.
 
     Returns:
-        A ``(segment_id, subsegments, result)`` triple where *result*
-        is the dict from :func:`evaluate_all_pas_usage_patterns` or
-        ``None``.
+        (segment_id, subsegments, result) triple.
     """
     segment_id, subsegments = segment_tuple
     result = evaluate_all_pas_usage_patterns(
@@ -501,24 +436,19 @@ def process_segment(
 def _read_coverage_batch(batch, bw_pos_path, bw_neg_path):
     """Read BigWig coverage for a batch of sub-segment rows.
 
-    Opens strand-specific BigWig handles once per call and closes them
-    on completion, making this safe to call from a
-    :class:`~concurrent.futures.ThreadPoolExecutor` worker where each
-    thread owns its own handles.  BigWig reads release the GIL, so
-    threads provide genuine parallelism here.
+    Opens strand-specific handles once, reads coverage for each row,
+    then closes. Safe for ThreadPoolExecutor workers (each thread owns
+    its handles; BigWig reads release the GIL).
 
     Args:
-        batch: Iterable of namedtuples (as returned by
-            :meth:`~pandas.DataFrame.itertuples`) with fields
-            ``gene_id``, ``segment_id``, ``subsegment_id``, ``chrom``,
-            ``start``, ``end``, ``strand``, ``pas_id``.
+        batch: Iterable of namedtuples with gene_id, segment_id,
+            subsegment_id, chrom, start, end, strand, pas_id fields.
         bw_pos_path: Path to the positive-strand BigWig file.
         bw_neg_path: Path to the negative-strand BigWig file.
 
     Returns:
-        List of coverage record dicts with keys ``gene_id``,
-        ``segment_id``, ``subsegment_id``, ``pas_id``, ``mean_cov``,
-        ``sum_squared_values``, ``coverage``.
+        List of dicts with gene_id, segment_id, subsegment_id, pas_id,
+        mean_cov, sum_squared_values, coverage.
     """
     bw_pos = pyBigWig.open(bw_pos_path)
     bw_neg = pyBigWig.open(bw_neg_path)
@@ -554,21 +484,17 @@ def _read_coverage_batch(batch, bw_pos_path, bw_neg_path):
 
 
 class CalculateCoverages:
-    """Compute RNA-seq coverage metrics and PAS usage fractions.
+    """Compute per-sub-segment coverage metrics and PAS usage fractions.
 
-    Reads strand-specific BigWig coverage tracks, computes per-sub-
-    segment mean and sum-squared coverage, evaluates poly-A site (PAS)
-    usage models via monotone ANOVA F-statistics, and optionally
-    enriches results with per-segment expression rank information from
-    a BAM file.
+    Reads strand-specific BigWig tracks, evaluates PAS usage models via
+    monotone ANOVA F-statistics, and optionally enriches results with
+    per-segment expression ranks from a BAM file.
 
     Attributes:
         coverage_bw_pos: Path to the positive-strand BigWig file.
         coverage_bw_neg: Path to the negative-strand BigWig file.
-        bam_file: Optional path to a BAM file for read-count-based
-            expression statistics.
-        f_stat_threshold: Default F-statistic threshold used when
-            :meth:`run` is called without an explicit threshold.
+        bam_file: Optional BAM path for expression rank statistics.
+        f_stat_threshold: Default F-statistic threshold for run().
     """
 
     def __init__(
@@ -578,15 +504,12 @@ class CalculateCoverages:
         bam_file=None,
         f_stat_threshold=100,
     ):
-        """Initialise with BigWig paths and optional BAM file.
-
-        Args:
+        """Args:
             coverage_bw_pos: Path to the positive-strand BigWig file.
             coverage_bw_neg: Path to the negative-strand BigWig file.
-            bam_file: Optional BAM file path; required only when
-                :meth:`calculate_segment_expression_stats` is called.
-            f_stat_threshold: Default minimum F-statistic for
-                :meth:`run`.
+            bam_file: Optional BAM file; required only for
+                calculate_segment_expression_stats.
+            f_stat_threshold: Default minimum F-statistic for run().
         """
         self.coverage_bw_pos = coverage_bw_pos
         self.coverage_bw_neg = coverage_bw_neg
@@ -596,31 +519,18 @@ class CalculateCoverages:
     def calculate_coverage_metrics(self, subsegments_df, n_threads=1):
         """Read BigWig coverage for every sub-segment.
 
-        Delegates to :func:`_read_coverage_batch`.  When
-        ``n_threads > 1`` the sub-segment list is split into equal
-        chunks and each chunk is processed by a separate thread using a
-        :class:`~concurrent.futures.ThreadPoolExecutor`.  BigWig reads
-        release the GIL, so threads provide genuine I/O parallelism.
-        Each worker opens and closes its own BigWig handles, so handles
-        are never shared across threads.
-
-        When ``n_threads == 1`` a single call to
-        :func:`_read_coverage_batch` processes all rows sequentially
-        with one pair of open handles — identical to the original
-        single-threaded behaviour.
+        When n_threads > 1, splits work across threads (BigWig reads
+        release the GIL, so threads provide real I/O parallelism).
 
         Args:
-            subsegments_df: DataFrame with columns ``gene_id``,
-                ``segment_id``, ``subsegment_id``, ``chrom``,
-                ``start``, ``end``, ``strand``, ``pas_id``.
-            n_threads: Number of threads for parallel BigWig reading.
-                Defaults to 1 (sequential).
+            subsegments_df: DataFrame with gene_id, segment_id,
+                subsegment_id, chrom, start, end, strand, pas_id.
+            n_threads: Number of threads (1 = sequential).
 
         Returns:
-            A new DataFrame with one row per sub-segment and columns
-            ``gene_id``, ``segment_id``, ``subsegment_id``,
-            ``pas_id``, ``mean_cov``, ``sum_squared_values``,
-            ``coverage``.
+            DataFrame with one row per sub-segment and columns gene_id,
+            segment_id, subsegment_id, pas_id, mean_cov,
+            sum_squared_values, coverage.
         """
         rows = list(subsegments_df.itertuples(index=False))
 
@@ -664,44 +574,23 @@ class CalculateCoverages:
     ):
         """Evaluate PAS usage patterns across all segments.
 
-        Groups sub-segments by ``segment_id``, then evaluates
-        :func:`evaluate_all_pas_usage_patterns` for each group.  When
-        ``n_procs > 1``, work is dispatched to a
-        :class:`~concurrent.futures.ProcessPoolExecutor`.
-
-        Groups are converted to plain lists of dicts before
-        dispatching to reduce pickle overhead.  Serialising a
-        :class:`~pandas.DataFrame` across process boundaries is
-        significantly more expensive than serialising a list of dicts
-        with NumPy arrays.
-
-        .. note::
-            For further optimisation, consider splitting I/O-bound
-            BigWig reads (:meth:`calculate_coverage_metrics`) onto a
-            :class:`~concurrent.futures.ThreadPoolExecutor` (BigWig
-            reads release the GIL) and reserving
-            :class:`~concurrent.futures.ProcessPoolExecutor` only for
-            the CPU-bound F-statistic computation here.
+        Groups sub-segments by segment_id and runs
+        evaluate_all_pas_usage_patterns on each. When n_procs > 1,
+        dispatches to a ProcessPoolExecutor; groups are converted to
+        dicts first to reduce pickle overhead.
 
         Args:
-            raw_cov_df: DataFrame as returned by
-                :meth:`calculate_coverage_metrics`, with a
-                ``"segment_id"`` column.
-            output_tsv_debug: Optional path to write a JSON debug
-                dump of all evaluated patterns.
+            raw_cov_df: DataFrame from calculate_coverage_metrics.
+            output_tsv_debug: Optional path to write a JSON debug dump.
             n_procs: Number of worker processes.
-            max_pas_count: Forwarded to
-                :func:`evaluate_all_pas_usage_patterns`.
-            f_stat_threshold: Forwarded to
-                :func:`evaluate_all_pas_usage_patterns`.
+            max_pas_count: Skip segments with more PAS than this.
+            f_stat_threshold: Minimum F-statistic to retain a pattern.
             debug: Emit verbose per-pattern debug log messages.
 
         Returns:
-            A DataFrame with columns ``gene_id``, ``segment_id``,
-            ``subsegment_id``, ``pas_id``, ``mean_cov``,
-            ``sum_squared_values``, ``rna_drop_cov``,
-            ``rna_sum_drop_cov``, ``rna_monotone``, ``rna_usage``,
-            ``f_stat``, ``p_value``.
+            DataFrame with columns gene_id, segment_id, subsegment_id,
+            pas_id, mean_cov, sum_squared_values, rna_drop_cov,
+            rna_sum_drop_cov, rna_monotone, rna_usage, f_stat, p_value.
         """
         usage_rows = []
         debug_rows = []
@@ -833,27 +722,20 @@ class CalculateCoverages:
         return usage_df[cols]
 
     def calculate_segment_expression_stats(self, usage_df, subsegments_df):
-        """Compute per-segment expression ranks and merge onto usage table.
+        """Compute per-segment RPM and median coverage, merge onto usage_df.
 
-        Derives four expression metrics per segment:
-
-        - **rpm**: read count divided by segment length (from BAM).
-        - **rpm_rank**: dense rank of ``rpm`` (1 = highest).
-        - **median_cov**: median BigWig coverage across the segment.
-        - **median_rank**: dense rank of ``median_cov`` (1 = highest).
+        Adds four columns: rpm (reads/segment length from BAM), rpm_rank,
+        median_cov (BigWig), median_rank. Dense rank, 1 = highest.
 
         Args:
-            usage_df: Per-PAS usage DataFrame as returned by
-                :meth:`evaluate_pas_usage_models`.
-            subsegments_df: Sub-segment coordinate table used to
-                derive segment boundaries.
+            usage_df: Per-PAS DataFrame from evaluate_pas_usage_models.
+            subsegments_df: Sub-segment table to derive segment boundaries.
 
         Returns:
-            *usage_df* merged with four new columns: ``rpm``,
-            ``rpm_rank``, ``median_cov``, ``median_rank``.
+            usage_df merged with rpm, rpm_rank, median_cov, median_rank.
 
         Raises:
-            ValueError: If ``self.bam_file`` is not set.
+            ValueError: If self.bam_file is not set.
         """
         # 1) Build segment metadata from the subsegments DataFrame.
         # subsegments_df already carries segment_id and gene_id directly.
@@ -962,33 +844,24 @@ class CalculateCoverages:
         f_stat_threshold=None,
         debug=False,
     ):
-        """Execute the full coverage and PAS usage pipeline.
+        """Run the full coverage and PAS usage pipeline.
 
-        Steps, in order:
-
-        1. Compute per-sub-segment coverage metrics from BigWig files
-           (parallelised across threads when ``n_threads > 1``).
-        2. Evaluate PAS usage models via F-statistics (parallelised
-           across worker processes when ``n_threads > 1``).
-        3. Optionally compute per-segment expression ranks from BAM.
+        Computes coverage metrics, evaluates PAS usage models, and
+        optionally computes BAM expression stats. Returns a slimmed
+        coverage table (coverage arrays dropped) alongside the usage
+        DataFrame.
 
         Args:
-            subsegments_df: Sub-segment coordinate table from
-                :meth:`~paqr3.construct_segments.ConstructSegments\
-.create_subsegments_dataframe`.
-            output_debug_json: Optional path for a JSON debug dump of
-                all evaluated patterns.
-            n_threads: Number of threads for BigWig reading *and*
-                worker processes for F-statistic evaluation.
-            max_pas_count: Passed to
-                :func:`evaluate_all_pas_usage_patterns`; segments with
-                more PAS are skipped.
+            subsegments_df: Sub-segment coordinate table.
+            output_debug_json: Optional path for a JSON debug dump.
+            n_threads: Threads for BigWig reading and F-stat workers.
+            max_pas_count: Skip segments with more PAS than this.
             f_stat_threshold: F-statistic threshold; falls back to
-                ``self.f_stat_threshold`` when ``None``.
+                self.f_stat_threshold when None.
             debug: Emit verbose per-pattern debug log messages.
 
         Returns:
-            The final per-PAS usage DataFrame.
+            (raw_cov_slim, usage_df) tuple.
         """
         start_time = time.time()
 

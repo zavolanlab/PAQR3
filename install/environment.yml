@@ -17,4 +17,4 @@ dependencies:
   - pigz
   - pip >=20.2.3
   - pip:
-    - -e .
+    - -e ..

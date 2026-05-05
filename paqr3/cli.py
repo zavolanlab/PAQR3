@@ -1,11 +1,4 @@
-"""Command-line interface for PAQR3.
-
-Three sub-commands are exposed:
-
-- ``paqr3 segment`` — run only the segmentation stage.
-- ``paqr3 quant``   — run only the quantification stage.
-- ``paqr3 full``    — run both stages end-to-end.
-"""
+"""Command-line interface for PAQR3."""
 
 import argparse
 import logging
@@ -231,7 +224,7 @@ def _require_chr_sizes(args: argparse.Namespace) -> None:
 
 
 def _run_segment(args: argparse.Namespace) -> None:
-    """Handle the ``segment`` sub-command."""
+    """Handle the segment sub-command."""
     _set_verbosity(args)
     _require_file(args.annotation, "--annotation")
     _require_file(args.pas_atlas, "--pas-atlas")
@@ -252,7 +245,7 @@ def _run_segment(args: argparse.Namespace) -> None:
 
 
 def _run_quant(args: argparse.Namespace) -> None:
-    """Handle the ``quant`` sub-command."""
+    """Handle the quant sub-command."""
     _set_verbosity(args)
     _require_chr_sizes(args)
     _require_file(args.segments_tsv, "--segments-tsv")
@@ -280,7 +273,7 @@ def _run_quant(args: argparse.Namespace) -> None:
 
 
 def _run_full(args: argparse.Namespace) -> None:
-    """Handle the ``full`` sub-command."""
+    """Handle the full sub-command."""
     _set_verbosity(args)
     _require_chr_sizes(args)
     _require_file(args.annotation, "--annotation")
