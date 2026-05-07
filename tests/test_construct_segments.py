@@ -461,3 +461,217 @@ class TestComputeOnRealData:
         cs.run(out_tsv=None, merge_distance=5)
         assert cs.pas_df is not None
         assert len(cs.genes) > 0
+
+    def test_debug_beds_written(self, tmp_path, test_gtf, test_atlas):
+        prefix = str(tmp_path / "dbg")
+        cs = ConstructSegments(test_gtf, test_atlas, downstream_exon_extension=200)
+        cs.run(out_tsv=None, merge_distance=5, out_debug_prefix=prefix)
+        for suffix in ("_genes.bed", "_segments.bed",
+                       "_subsegments.bed", "_pas.bed"):
+            assert os.path.exists(prefix + suffix)
+
+    def test_write_segments_pas_to_bed(self, tmp_path, test_gtf, test_atlas):
+        cs = ConstructSegments(test_gtf, test_atlas, downstream_exon_extension=200)
+        cs.compute(merge_distance=5)
+        # Inject a gene with no transcripts to cover the else branch (line 1008)
+        cs.genes["_EMPTY_GENE_"] = Gene("_EMPTY_GENE_")
+        out_genes = str(tmp_path / "genes.bed")
+        out_segs = str(tmp_path / "segs.bed")
+        out_subs = str(tmp_path / "subs.bed")
+        out_pas = str(tmp_path / "pas.bed")
+        cs.write_segments_pas_to_bed(out_genes, out_segs, out_subs, out_pas)
+        for path in (out_genes, out_segs, out_subs, out_pas):
+            assert os.path.exists(path)
+
+    def test_zero_length_subsegment_skipped(self, tmp_path, test_gtf, test_atlas):
+        cs = ConstructSegments(test_gtf, test_atlas, downstream_exon_extension=200)
+        cs.compute(merge_distance=5)
+        # Inject a zero-length subsegment into the first segment that has subs.
+        for gene in cs.genes.values():
+            for seg in gene.segments:
+                if seg.subsegments:
+                    zero_sub = Region(
+                        region_type="subsegment",
+                        chrom="chr1",
+                        start=1000,
+                        end=1000,
+                        strand="+",
+                        attributes={"subsegment_number": 999, "pas_id": "."},
+                    )
+                    seg.subsegments.insert(0, zero_sub)
+                    break
+            else:
+                continue
+            break
+        df = cs.create_subsegments_dataframe()
+        assert (df["subsegment_id"].str.endswith(":999")).sum() == 0
+
+
+# ---------------------------------------------------------------------------
+# parse_gtf_to_genes: skip paths (lines 123, 133, 153)
+# ---------------------------------------------------------------------------
+
+
+class TestParseGtfSkips:
+    def _cs(self):
+        return _make_cs()
+
+    def test_nan_seqname_gene_skipped(self):
+        import numpy as np
+        cs = self._cs()
+        gtf_df = pd.DataFrame([{
+            "feature": "gene", "gene_id": "g_nan",
+            "seqname": np.nan,
+            "source": ".", "start": 1, "end": 100,
+            "score": ".", "strand": "+",
+        }])
+        result = cs.parse_gtf_to_genes(gtf_df)
+        assert "g_nan" not in result
+
+    def test_orphan_transcript_skipped(self):
+        cs = self._cs()
+        gtf_df = pd.DataFrame([{
+            "feature": "transcript",
+            "gene_id": "NONEXISTENT", "transcript_id": "t1",
+            "seqname": "chr1", "source": ".", "start": 1, "end": 100,
+            "score": ".", "strand": "+",
+        }])
+        result = cs.parse_gtf_to_genes(gtf_df)
+        assert "NONEXISTENT" not in result
+
+    def test_orphan_exon_skipped(self):
+        cs = self._cs()
+        gtf_df = pd.DataFrame([
+            {"feature": "gene", "gene_id": "g1",
+             "seqname": "chr1", "source": ".", "start": 1, "end": 200,
+             "score": ".", "strand": "+"},
+            {"feature": "exon", "gene_id": "g1",
+             "transcript_id": "ORPHAN_TX",
+             "seqname": "chr1", "source": ".", "start": 10, "end": 50,
+             "score": ".", "strand": "+"},
+        ])
+        result = cs.parse_gtf_to_genes(gtf_df)
+        assert "g1" in result
+        assert not result["g1"].transcripts
+
+
+# ---------------------------------------------------------------------------
+# extend_gene_coordinates: skip paths (lines 205, 208, 237)
+# ---------------------------------------------------------------------------
+
+
+class TestExtendGeneCoordinatesSkips:
+    def test_gene_no_transcripts_skipped(self):
+        cs = _make_cs()
+        cs.genes = {"empty": Gene("empty")}
+        cs.extend_gene_coordinates()  # must not crash (line 205)
+
+    def test_gene_with_empty_transcript_skipped(self):
+        cs = _make_cs()
+        gene = Gene("g1", attributes={})
+        tx = Transcript("t1", "+")  # no regions → chrom is None
+        gene.add_transcript(tx)
+        cs.genes = {"g1": gene}
+        cs.extend_gene_coordinates()  # must not crash (line 208)
+
+    def test_overlapping_minus_genes_while_loop(self):
+        cs = _make_cs(downstream_exon_extension=200)
+        gene1 = _make_gene("g1", [(1000, 2000)], strand="-")
+        gene2 = _make_gene("g2", [(1800, 3000)], strand="-")
+        cs.genes = {"g1": gene1, "g2": gene2}
+        cs.extend_gene_coordinates()  # line 237 hit: prev_end >= gene_start
+
+
+# ---------------------------------------------------------------------------
+# extend_exon_downstream: skip paths (lines 251, 255, 277-278, 297-298)
+# ---------------------------------------------------------------------------
+
+
+class TestExtendExonDownstreamSkips:
+    def test_gene_no_transcripts_skipped(self):
+        cs = _make_cs()
+        cs.genes = {"empty": Gene("empty")}
+        cs.extend_exon_downstream()  # line 251
+
+    def test_transcript_no_regions_skipped(self):
+        cs = _make_cs()
+        gene = Gene("g1", attributes={"start": 0, "end": 2000})
+        tx = Transcript("t1", "+")
+        gene.add_transcript(tx)
+        cs.genes = {"g1": gene}
+        cs.extend_exon_downstream()  # line 255
+
+    def test_plus_gene_minus_strand_exon(self):
+        cs = _make_cs(downstream_exon_extension=200)
+        gene = Gene("g1", attributes={"start": 800, "end": 2200})
+        tx = Transcript("t1", "+")
+        tx.add_region(Region(
+            region_type="exon", chrom="chr1",
+            start=2000, end=2100, strand="-",
+            attributes={"gene_id": "g1", "is_terminal_exon": True},
+        ))
+        gene.add_transcript(tx)
+        cs.genes = {"g1": gene}
+        cs.extend_exon_downstream()  # lines 277-278
+
+    def test_minus_gene_plus_strand_exon(self):
+        cs = _make_cs(downstream_exon_extension=200)
+        gene = Gene("g1", attributes={"start": 800, "end": 2200})
+        tx = Transcript("t1", "-")
+        tx.add_region(Region(
+            region_type="exon", chrom="chr1",
+            start=1000, end=1100, strand="+",
+            attributes={"gene_id": "g1", "is_terminal_exon": True},
+        ))
+        gene.add_transcript(tx)
+        cs.genes = {"g1": gene}
+        cs.extend_exon_downstream()  # lines 297-298
+
+
+# ---------------------------------------------------------------------------
+# construct_segments: empty gene skip (line 366)
+# ---------------------------------------------------------------------------
+
+
+class TestConstructSegmentsSkip:
+    def test_empty_gene_skipped(self):
+        cs = _make_cs()
+        cs.genes = {"empty": Gene("empty")}
+        cs.construct_segments()  # line 366, must not crash
+
+
+# ---------------------------------------------------------------------------
+# process_pas_atlas: error paths (lines 522-533, 536-537, 569-574)
+# ---------------------------------------------------------------------------
+
+
+class TestProcessPasAtlasErrorPaths:
+    def test_invalid_rpm_value_defaults_to_zero(self, tmp_path):
+        bed = str(tmp_path / "invalid_rpm.bed")
+        _write_bed(bed, [["chr1", 100, 200, "cs1", "INVALID", "+"]])
+        cs = ConstructSegments("", bed, 200)
+        cs.process_pas_atlas()
+        assert cs.pas_df is not None
+        assert cs.pas_df.iloc[0]["atlas_rpm"] == pytest.approx(0.0)
+
+    def test_three_col_bed_defaults(self, tmp_path):
+        bed = str(tmp_path / "short.bed")
+        _write_bed(bed, [["chr1", 100, 200]])
+        cs = ConstructSegments("", bed, 200)
+        cs.process_pas_atlas()
+        assert cs.pas_df is not None
+        assert cs.pas_df.iloc[0]["atlas_rpm"] == pytest.approx(0.0)
+
+    def test_mid_loop_flush_with_dot_name(self, tmp_path):
+        # First site "." name, then a non-mergeable second site
+        # → mid-loop flush with rep_name="." → lines 569-574
+        bed = str(tmp_path / "dot_name.bed")
+        _write_bed(bed, [
+            ["chr1", 100, 110, ".", 50.0, "+"],
+            ["chr1", 300, 310, "cs2", 60.0, "+"],
+        ])
+        cs = ConstructSegments("", bed, 200)
+        cs.process_pas_atlas(merge_distance=5)
+        assert cs.pas_df is not None
+        assert len(cs.pas_df) == 2
+        assert cs.pas_df.iloc[0]["rep_cs"].startswith("chr1:")

@@ -70,11 +70,13 @@ class ConstructSegments:
     # ------------------------------------------------------------------
 
     def _gene_extent(self, gene: Gene) -> tuple[int, int]:
-        """Return (min_start, max_end) across all regions of gene."""
+        """Return (min_start, max_end) across all regions of gene, or (0, 0)."""
         starts = [
             r.start for t in gene.transcripts.values() for r in t.regions
         ]
         ends = [r.end for t in gene.transcripts.values() for r in t.regions]
+        if not starts:
+            return (0, 0)
         return min(starts), max(ends)
 
     def _gene_chrom(self, gene: Gene) -> str | None:

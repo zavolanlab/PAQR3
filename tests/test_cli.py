@@ -1,5 +1,6 @@
 """Unit tests for paqr3.cli."""
 
+import runpy
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -296,3 +297,42 @@ class TestFullArgParsing:
     def test_version_flag_exits_zero(self):
         exc = _run_exits(["--version"])
         assert exc.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# _require_chr_sizes: nonexistent chr-sizes file (line 217)
+# ---------------------------------------------------------------------------
+
+
+class TestRequireChrSizes:
+    def _seg_tsv(self, tmp_path: Path) -> str:
+        path = tmp_path / "output_segments.tsv"
+        path.write_text("chrom\tstart\tend\n")
+        return str(path)
+
+    def test_chr_sizes_file_not_found_exits(
+        self, test_bw_pos, test_bw_neg, tmp_path
+    ):
+        seg = self._seg_tsv(tmp_path)
+        exc = _run_exits([
+            "quant",
+            "--segments-tsv", seg,
+            "--coverage-pos", test_bw_pos,
+            "--coverage-neg", test_bw_neg,
+            "--output-dir", str(tmp_path),
+            "--emit", "mean_cov",
+            "--chr-sizes", "/nonexistent/chrom.sizes",
+        ])
+        assert exc.value.code != 0
+
+
+# ---------------------------------------------------------------------------
+# __main__ block (line 376)
+# ---------------------------------------------------------------------------
+
+
+class TestMainBlock:
+    def test_main_block_executes(self):
+        with patch.object(sys, "argv", ["paqr3", "--version"]):
+            with pytest.raises(SystemExit):
+                runpy.run_module("paqr3.cli", run_name="__main__")

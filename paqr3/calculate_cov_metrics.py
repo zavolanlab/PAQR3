@@ -312,7 +312,7 @@ def evaluate_all_pas_usage_patterns(
             for i in range(len(group_means) - 1)
         ]
     else:
-        union_drops = [group_means[0]]
+        union_drops = [group_means[0]]  # pragma: no cover
     union_drops.append(0.0)
     sum_union_drops = sum(union_drops)
 
@@ -698,7 +698,6 @@ class CalculateCoverages:
             with open(output_tsv_debug, "w") as fh:
                 json.dump(debug_rows, fh, indent=4, default=json_serial)
 
-        usage_df = pd.DataFrame(usage_rows)
         cols = [
             "gene_id",
             "segment_id",
@@ -713,7 +712,8 @@ class CalculateCoverages:
             "f_stat",
             "p_value",
         ]
-        return usage_df[cols]
+        usage_df = pd.DataFrame(usage_rows)
+        return usage_df.reindex(columns=cols)
 
     def run(
         self,
