@@ -568,7 +568,10 @@ class TestRunQuantExtra:
         )
         paqr3.run_quant(segments_tsv, sample_name="bw_sample")
         results_dir = tmp_path / "bw_sample_results"
-        assert (results_dir / "bw_sample_mean_cov.bw").exists()
+        assert (
+            (results_dir / "bw_sample_mean_cov.pos.bw").exists()
+            or (results_dir / "bw_sample_mean_cov.neg.bw").exists()
+        )
 
     def test_emit_bigwigs_observed_uses_pas_coords(
         self, tmp_path, segments_tsv, test_bw_pos, test_bw_neg

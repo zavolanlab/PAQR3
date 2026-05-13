@@ -212,16 +212,15 @@ class PAQR3:
         chrom_sizes = _load_chrom_sizes(self.chr_sizes_file)
 
         coords = subsegments_df[
-            ["subsegment_id", "chrom", "start", "end"]
+            ["subsegment_id", "chrom", "strand", "start", "end"]
         ].drop_duplicates("subsegment_id")
 
         for mode in bw_modes:
             for source_key, col, coord_type, suffix in _EMIT_BW_SPEC[mode]:
-                out_path = os.path.join(results_dir, f"{sname}_{suffix}.bw")
                 source_df = raw_cov_df if source_key == "raw" else posterior_df
                 if coord_type == "pas" and pas_coords is not None:
                     df_with_coords = source_df.merge(
-                        pas_coords[["pas_id", "chrom", "start", "end"]],
+                        pas_coords[["pas_id", "chrom", "strand", "start", "end"]],
                         on="pas_id",
                         how="left",
                     )
@@ -229,7 +228,18 @@ class PAQR3:
                     df_with_coords = source_df.merge(
                         coords, on="subsegment_id", how="left"
                     )
-                _write_bigwig(df_with_coords, col, chrom_sizes, out_path)
+                for strand_char, strand_tag in [("+", "pos"), ("-", "neg")]:
+                    out_path = os.path.join(
+                        results_dir, f"{sname}_{suffix}.{strand_tag}.bw"
+                    )
+                    _write_bigwig(
+                        df_with_coords[
+                            df_with_coords["strand"] == strand_char
+                        ],
+                        col,
+                        chrom_sizes,
+                        out_path,
+                    )
 
     def run_segment(self, output_dir: str | None = None) -> str:
         """Run the segmentation stage and write the segments TSV.
