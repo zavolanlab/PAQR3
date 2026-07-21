@@ -217,12 +217,15 @@ class ConstructSegments:
             if gene_strand == "+":
                 potential_end = gene_end + self.downstream_exon_extension
                 next_gene_start = potential_end
-                # bisect_right finds the first entry with start >
-                # gene_end — i.e. the nearest downstream gene.
-                idx = bisect.bisect_right(starts, gene_end)
+                # bisect_left finds the first entry with start >= gene_end,
+                # catching book-ended neighbours (start == gene_end) as well
+                # as strictly downstream ones.
+                idx = bisect.bisect_left(starts, gene_end)
                 if idx < len(entries):
                     next_gene_start = min(potential_end, entries[idx][0] - 1)
-                gene_end = min(potential_end, next_gene_start)
+                # max(gene_end, ...) prevents shrinking a gene that already
+                # reaches or shares the boundary with the next gene.
+                gene_end = max(gene_end, min(potential_end, next_gene_start))
 
             elif gene_strand == "-":
                 potential_start = gene_start - self.downstream_exon_extension
@@ -233,8 +236,9 @@ class ConstructSegments:
                 while idx >= 0:
                     _, prev_gene = entries[idx]
                     _, prev_end = self._gene_extent(prev_gene)
-                    if prev_end < gene_start:
-                        previous_gene_end = max(potential_start, prev_end + 1)
+                    # <= catches book-ended upstream genes (prev_end == gene_start).
+                    if prev_end <= gene_start:
+                        previous_gene_end = max(potential_start, prev_end)
                         break
                     idx -= 1
                 gene_start = max(potential_start, previous_gene_end)

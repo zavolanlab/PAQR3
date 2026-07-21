@@ -8,7 +8,14 @@ import pandas as pd
 import pyBigWig
 import pytest
 
-from paqr3.paqr3 import PAQR3, _load_chrom_sizes, _resolve_emit, _write_bigwig, _write_tsv
+from paqr3.paqr3 import (
+    PAQR3,
+    _diagnose_bigwig_overlap,
+    _load_chrom_sizes,
+    _resolve_emit,
+    _write_bigwig,
+    _write_tsv,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +271,7 @@ class TestRunQuant:
             sep="\t",
         )
         for col in ("chr", "start", "end", "strand", "segment_id",
-                    "rna_sum_drop_cov", "f_stat", "p_value"):
+                    "rna_sum_drop_cov", "f_stat", "p_value", "rna_monotone"):
             assert col in df.columns
 
     def test_subsegment_results_columns(
@@ -474,6 +481,89 @@ class TestWriteBigwig:
         bw = pyBigWig.open(path)
         assert bw.stats("chr1", 100, 200)[0] == pytest.approx(5.0)
         bw.close()
+
+    def test_overlapping_entries_raise_and_log(self, tmp_path, caplog):
+        """Overlapping intervals trigger diagnostic logging then re-raise."""
+        import logging
+        df = pd.DataFrame({
+            "chrom": ["chr1", "chr1"],
+            "start": [100, 150],
+            "end": [200, 250],
+            "val": [1.0, 2.0],
+        })
+        path = str(tmp_path / "overlap.bw")
+        with caplog.at_level(logging.ERROR, logger="paqr3.paqr3"):
+            with pytest.raises(RuntimeError):
+                _write_bigwig(df, "val", {"chr1": 1000}, path)
+        assert any("overlaps previous entry" in r.message for r in caplog.records)
+
+
+class TestDiagnoseBigwigOverlap:
+    def test_overlap_logged(self, caplog):
+        import logging
+        with caplog.at_level(logging.ERROR, logger="paqr3.paqr3"):
+            _diagnose_bigwig_overlap(
+                "chr1",
+                starts=[100, 150],
+                ends=[200, 250],
+                values=[1.0, 2.0],
+                chrom_sizes={"chr1": 1000},
+                path="test.bw",
+            )
+        assert any("overlaps previous entry" in r.message for r in caplog.records)
+
+    def test_zero_length_logged(self, caplog):
+        import logging
+        with caplog.at_level(logging.ERROR, logger="paqr3.paqr3"):
+            _diagnose_bigwig_overlap(
+                "chr1",
+                starts=[100],
+                ends=[100],
+                values=[1.0],
+                chrom_sizes={"chr1": 1000},
+                path="test.bw",
+            )
+        assert any("zero/negative length" in r.message for r in caplog.records)
+
+    def test_exceeds_chrom_size_logged(self, caplog):
+        import logging
+        with caplog.at_level(logging.ERROR, logger="paqr3.paqr3"):
+            _diagnose_bigwig_overlap(
+                "chr1",
+                starts=[900],
+                ends=[1100],
+                values=[1.0],
+                chrom_sizes={"chr1": 1000},
+                path="test.bw",
+            )
+        assert any("exceeds chrom size" in r.message for r in caplog.records)
+
+    def test_many_violations_truncated(self, caplog):
+        """More than MAX_REPORT violations shows a 'more violations' message."""
+        import logging
+        # 10 overlapping entries all starting at 0
+        starts = [0] * 10
+        ends = [100] * 10
+        values = [float(i) for i in range(10)]
+        with caplog.at_level(logging.ERROR, logger="paqr3.paqr3"):
+            _diagnose_bigwig_overlap(
+                "chr1", starts, ends, values, {"chr1": 1000}, "test.bw"
+            )
+        assert any("more violation" in r.message for r in caplog.records)
+
+    def test_no_chrom_size_skips_boundary_check(self, caplog):
+        """When chrom is not in chrom_sizes, no boundary violation is logged."""
+        import logging
+        with caplog.at_level(logging.ERROR, logger="paqr3.paqr3"):
+            _diagnose_bigwig_overlap(
+                "chrX",
+                starts=[100],
+                ends=[9999],
+                values=[1.0],
+                chrom_sizes={},
+                path="test.bw",
+            )
+        assert not any("exceeds chrom size" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

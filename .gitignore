@@ -174,3 +174,5 @@ cython_debug/
 data/*
 results/
 cluster_scripts/
+igv/
+CLAUDE.md
