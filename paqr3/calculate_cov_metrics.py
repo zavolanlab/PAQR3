@@ -354,7 +354,10 @@ def evaluate_all_pas_usage_patterns(
         "rna_drop_cov": drop_per_pas,
         "rna_sum_drop_cov": sum_union_drops,
         "rna_monotone": union_mono,
-        "used_combos": [pat for pat, *_ in combos_info],
+        "used_combos": [
+            {"pattern": list(pat), "f_stat": f_val, "p_value": p_val}
+            for pat, f_val, p_val in combos_info
+        ],
         "debug_info": {
             "threshold": f_stat_threshold,
             "num_kept_combos": len(combos_info),
