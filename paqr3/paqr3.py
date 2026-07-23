@@ -221,6 +221,7 @@ class PAQR3:
         max_pas_count: int,
         f_stat_threshold: int = 100,
         posterior_usage_weight: float = 0.1,
+        pas_cluster_distance: int = 250,
         n_threads: int = 1,
         emit: list[str] | None = None,
         chr_sizes_file: str | None = None,
@@ -236,6 +237,7 @@ class PAQR3:
         self.max_pas_count = max_pas_count
         self.f_stat_threshold = f_stat_threshold
         self.posterior_usage_weight = posterior_usage_weight
+        self.pas_cluster_distance = pas_cluster_distance
         self.n_threads = n_threads
         self.emit = emit
         self.chr_sizes_file = chr_sizes_file
@@ -398,6 +400,7 @@ class PAQR3:
             max_pas_count=self.max_pas_count,
             f_stat_threshold=self.f_stat_threshold,
             debug=logger.isEnabledFor(logging.DEBUG),
+            cluster_distance=self.pas_cluster_distance,
         )
 
         # Map atlas_rpm via subsegment_id.
@@ -691,6 +694,7 @@ class PAQR3:
             max_pas_count=self.max_pas_count,
             f_stat_threshold=self.f_stat_threshold,
             debug=logger.isEnabledFor(logging.DEBUG),
+            cluster_distance=self.pas_cluster_distance,
         )
 
         # Map atlas_rpm from in-memory pas_df (rep_cs → atlas_rpm).

@@ -169,6 +169,17 @@ def _add_quant_args(p: argparse.ArgumentParser) -> None:
         help="Weight for observed RPM in posterior blending (default: 0.1).",
     )
     p.add_argument(
+        "--cluster-distance",
+        "-cd",
+        type=int,
+        default=250,
+        help=(
+            "Maximum centre-to-centre distance (bp) to merge consecutive "
+            "PAS into one cluster for ANOVA. 0 disables clustering "
+            "(default: 250)."
+        ),
+    )
+    p.add_argument(
         "--threads",
         "-t",
         type=int,
@@ -257,6 +268,7 @@ def _run_quant(args: argparse.Namespace) -> None:
         max_pas_count=args.max_pas_count,
         f_stat_threshold=args.f_stat_threshold,
         posterior_usage_weight=args.posterior_usage_weight,
+        pas_cluster_distance=args.cluster_distance,
         n_threads=args.threads,
         emit=args.emit,
         chr_sizes_file=args.chr_sizes,
@@ -285,6 +297,7 @@ def _run_full(args: argparse.Namespace) -> None:
         max_pas_count=args.max_pas_count,
         f_stat_threshold=args.f_stat_threshold,
         posterior_usage_weight=args.posterior_usage_weight,
+        pas_cluster_distance=args.cluster_distance,
         n_threads=args.threads,
         emit=args.emit,
         chr_sizes_file=args.chr_sizes,
