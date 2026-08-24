@@ -131,19 +131,26 @@ def evaluate_all_pas_usage_patterns(
             "unique_pas_ids": unique_pas_ids,
         }
 
-    # 2) Single-PAS segment: force usage = 1 if coverage > 0
+    # 2) Single-PAS segment: assign usage = 1 only when coverage drops
+    # after the PAS.  A flat or rising trailing profile means the PAS is
+    # not a genuine usage signal.  Drop = PAS_mean - trailing_mean
+    # (consistent with the multi-PAS boundary drop formula).
     if len(unique_pas_ids) == 1:
         pid = unique_pas_ids[0]
         idx = next(i for i, x in enumerate(pas_ids) if x == pid)
         mu = computed_means[idx]
-        if mu > 0:
-            usage, drop, sum_drop, mono = 1.0, mu, mu, 1
+        trailing_covs = [computed_means[j] for j in range(idx + 1, len(pas_ids))]
+        trailing_mean = float(np.mean(trailing_covs)) if trailing_covs else 0.0
+        if mu > trailing_mean:
+            drop = mu - trailing_mean
+            usage, sum_drop, mono = 1.0, drop, 1
         else:
             usage, drop, sum_drop, mono = 0.0, 0.0, 0.0, 0
         if debug:
             logger.debug(
-                "DEBUG: [%s] Single PAS '%s', mean_cov=%.3f → usage=%.3f",
-                segment_id, pid, mu, usage,
+                "DEBUG: [%s] Single PAS '%s', mean_cov=%.3f, "
+                "trailing_mean=%.3f → usage=%.3f",
+                segment_id, pid, mu, trailing_mean, usage,
             )
         return {
             "pas_usage": {pid: usage},
@@ -345,56 +352,96 @@ def evaluate_all_pas_usage_patterns(
             )
         return None
 
-    # 7) Build the union pattern (cluster-level) and compute drops.
+    # 7) Compute the mathematical union (OR of all passing patterns) for
+    # debug reporting, then derive the active pattern via greedy monotone
+    # accumulation.
     union_pattern = [
         int(any(pat[i] for pat, *_ in combos_info)) for i in range(m)
     ]
 
-    # Reconstruct groups by scanning subsegments in order.  A group is
-    # closed when the last PAS of a cut-point cluster is encountered.
-    groups, current, pas_idx = [], [], 0
-    for cov_idx, pid in enumerate(pas_ids):
-        if pid == ".":
-            current.append(cov_idx)
-        else:
-            cid = cluster_id_per_pas[pas_idx]
-            is_last_in_cluster = (
-                pas_idx == m_orig - 1
-                or cluster_id_per_pas[pas_idx + 1] != cid
-            )
-            current.append(cov_idx)
-            if is_last_in_cluster and union_pattern[cid] == 1:
-                groups.append(current)
-                current = []
-            pas_idx += 1
-    if current:
-        groups.append(current)
+    def _reconstruct(
+        pattern: list[int],
+    ) -> tuple[list[list[int]], list[float], list[float], int]:
+        """Reconstruct groups from a cluster-cut pattern, compute drops.
 
-    group_means = [_group_mean(g) if g else 0.0 for g in groups]
+        Args:
+            pattern: Per-cluster cut flags (1 = cut after this cluster).
+
+        Returns:
+            Tuple of (groups, group_means, cluster_drops, is_monotone).
+        """
+        grps: list[list[int]] = []
+        cur: list[int] = []
+        pi = 0
+        for ci, pid in enumerate(pas_ids):
+            if pid == ".":
+                cur.append(ci)
+            else:
+                cid = cluster_id_per_pas[pi]
+                is_last = (
+                    pi == m_orig - 1
+                    or cluster_id_per_pas[pi + 1] != cid
+                )
+                cur.append(ci)
+                if is_last and pattern[cid] == 1:
+                    grps.append(cur)
+                    cur = []
+                pi += 1
+        if cur:
+            grps.append(cur)
+        g_means = [_group_mean(g) if g else 0.0 for g in grps]
+        if len(g_means) >= 2:
+            c_drops = [
+                g_means[i] - g_means[i + 1]
+                for i in range(len(g_means) - 1)
+            ]
+        else:
+            c_drops = [g_means[0]]  # pragma: no cover
+        c_drops.append(0.0)
+        c_sum = sum(c_drops)
+        mono = int(c_sum > 0 and all(d >= 0 for d in c_drops[:-1]))
+        return grps, g_means, c_drops, mono
+
+    # Greedy monotone union: process patterns in decreasing F-stat order.
+    # Accumulate each pattern's bits into the active union only when the
+    # result remains monotone.  A skipped pattern does not end the loop —
+    # later patterns with different bits may still be compatible.
+    # Because each individual pattern is monotone (DFS guarantee), the
+    # first (highest-F) pattern is always accepted.
+    active_pattern: list[int] = [0] * m
+    for pat, _fval, _pval in sorted(
+        combos_info, key=lambda x: x[1], reverse=True
+    ):
+        candidate = [max(active_pattern[i], pat[i]) for i in range(m)]
+        if candidate == active_pattern:
+            continue  # no new bits to add
+        _, _, _, cand_mono = _reconstruct(candidate)
+        if cand_mono:
+            active_pattern = candidate
+
+    groups, group_means, cluster_drops, final_mono = _reconstruct(
+        active_pattern
+    )
+    _, _, _, orig_union_mono = _reconstruct(union_pattern)
+
     if debug:
         logger.debug(
-            "DEBUG: Segment %s union group means: %s",
-            segment_id, group_means,
+            "DEBUG: Segment %s math_union_pattern: %s "
+            "(union_monotone=%d)",
+            segment_id, union_pattern, orig_union_mono,
         )
-
-    if len(group_means) >= 2:
-        cluster_drops = [
-            group_means[i] - group_means[i + 1]
-            for i in range(len(group_means) - 1)
-        ]
-    else:
-        cluster_drops = [group_means[0]]  # pragma: no cover
-    cluster_drops.append(0.0)
-    sum_cluster_drops = sum(cluster_drops)
-
-    union_mono = int(
-        sum_cluster_drops > 0 and all(d >= 0 for d in cluster_drops[:-1])
-    )
+        logger.debug(
+            "DEBUG: Segment %s selected_pattern (greedy): %s",
+            segment_id, active_pattern,
+        )
+        logger.debug(
+            "DEBUG: Segment %s group_means: %s", segment_id, group_means,
+        )
 
     # Map each cut-point cluster to its drop value.
     drop_per_cluster: dict[int, float] = {}
     drop_idx = 0
-    for cid, flag in enumerate(union_pattern):
+    for cid, flag in enumerate(active_pattern):
         if flag:
             drop_per_cluster[cid] = cluster_drops[drop_idx]
             drop_idx += 1
@@ -422,17 +469,13 @@ def evaluate_all_pas_usage_patterns(
     _, best_f, best_p = max(combos_info, key=lambda x: x[1])
 
     logger.debug(
-        "DEBUG: Segment %s union_pattern (clusters): %s",
-        segment_id, union_pattern,
-    )
-    logger.debug(
         "DEBUG: Segment %s cluster_drops: %s", segment_id, cluster_drops,
     )
     logger.debug(
         "DEBUG: Segment %s drop_per_pas: %s", segment_id, drop_per_pas,
     )
     logger.debug(
-        "DEBUG: Segment %s union_monotonic: %s", segment_id, union_mono,
+        "DEBUG: Segment %s final_mono: %s", segment_id, final_mono,
     )
 
     return {
@@ -443,7 +486,7 @@ def evaluate_all_pas_usage_patterns(
         "p_value": best_p,
         "rna_drop_cov": drop_per_pas,
         "rna_sum_drop_cov": sum_union_drops,
-        "rna_monotone": union_mono,
+        "rna_monotone": final_mono,
         "used_combos": [
             {"pattern": list(pat), "f_stat": f_val, "p_value": p_val}
             for pat, f_val, p_val in combos_info
@@ -454,6 +497,9 @@ def evaluate_all_pas_usage_patterns(
             "n_original_pas": m_orig,
             "n_clusters": n_clusters,
             "cluster_assignments": cluster_id_per_pas,
+            "math_union_pattern": union_pattern,
+            "math_union_monotone": orig_union_mono,
+            "selected_pattern": active_pattern,
         },
         "unique_pas_ids": unique_pas_ids,
     }

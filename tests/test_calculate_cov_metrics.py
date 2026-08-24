@@ -108,6 +108,28 @@ class TestEvaluateAllPasUsagePatterns:
         assert result is not None
         assert result["pas_usage"]["pas1"] == 0.0
 
+    def test_single_pas_trailing_higher_than_pas_usage_zero(self):
+        # Trailing coverage exceeds PAS coverage (rising profile) → no
+        # genuine poly(A) signal → usage=0 and rna_monotone=0.
+        subsegments = [
+            _sub("pas1", [3.0] * 20),
+            _sub(".", [6.0] * 20),
+        ]
+        result = evaluate_all_pas_usage_patterns(subsegments, "seg1")
+        assert result is not None
+        assert result["pas_usage"]["pas1"] == pytest.approx(0.0)
+        assert result["rna_monotone"] == 0
+
+    def test_single_pas_drop_equals_pas_minus_trailing(self):
+        # rna_drop_cov must equal PAS_mean - trailing_mean, not PAS_mean.
+        subsegments = [
+            _sub("pas1", [10.0] * 20),
+            _sub(".", [4.0] * 20),
+        ]
+        result = evaluate_all_pas_usage_patterns(subsegments, "seg1")
+        assert result is not None
+        assert result["rna_drop_cov"][0] == pytest.approx(6.0)  # 10 - 4
+
     def test_too_many_pas_returns_none(self):
         # 11 PAS with max_pas_count=10 → should return None
         subsegments = [_sub(f"pas{i}", [float(10 - i)]) for i in range(11)]
@@ -471,6 +493,68 @@ class TestUnionPatternBitZero:
         )
         if result is not None:
             assert result["pas_usage"]["pas1"] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# Greedy monotone union
+# ---------------------------------------------------------------------------
+
+
+class TestGreedyMonotoneUnion:
+    def test_non_monotone_math_union_resolved_by_greedy(self):
+        # Coverage 80 → 10 → 60 → 5 creates a valley pattern.
+        # The mathematical union [1,1,1] is non-monotone (10→60 inversion).
+        # The greedy loop accepts [1,0,1] (clusters 0 and 2 only, skipping
+        # cluster 1 whose inclusion would create the inversion), giving
+        # monotone group means 80 → 35 → 5.
+        subsegments = [
+            _sub("pas1", [80.0] * 50),
+            _sub("pas2", [10.0] * 50),
+            _sub("pas3", [60.0] * 50),
+            _sub(".", [5.0] * 50),
+        ]
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", f_stat_threshold=0
+        )
+        assert result is not None
+        assert result["rna_monotone"] == 1
+        assert result["debug_info"]["math_union_pattern"] == [1, 1, 1]
+        assert result["debug_info"]["math_union_monotone"] == 0
+        assert result["debug_info"]["selected_pattern"] == [1, 0, 1]
+
+    def test_non_monotone_math_union_greedy_debug_path(self):
+        # Same scenario as above with debug=True to cover the debug log
+        # branch that fires when math_union_monotone differs from selected.
+        subsegments = [
+            _sub("pas1", [80.0] * 50),
+            _sub("pas2", [10.0] * 50),
+            _sub("pas3", [60.0] * 50),
+            _sub(".", [5.0] * 50),
+        ]
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", f_stat_threshold=0, debug=True
+        )
+        assert result is not None
+        assert result["rna_monotone"] == 1
+
+    def test_monotone_math_union_unchanged_by_greedy(self):
+        # When the mathematical union is already monotone, the greedy loop
+        # accumulates all bits and selected_pattern == math_union_pattern.
+        subsegments = [
+            _sub("pas1", [100.0] * 50),
+            _sub("pas2", [60.0] * 50),
+            _sub(".", [10.0] * 50),
+        ]
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", f_stat_threshold=0
+        )
+        assert result is not None
+        assert result["rna_monotone"] == 1
+        assert result["debug_info"]["math_union_monotone"] == 1
+        assert (
+            result["debug_info"]["selected_pattern"]
+            == result["debug_info"]["math_union_pattern"]
+        )
 
 
 # ---------------------------------------------------------------------------
