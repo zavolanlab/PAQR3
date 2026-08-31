@@ -853,7 +853,7 @@ class ConstructSegments:
                 debug_rows.append({
                     "chrom": g_chrom, "start": g_start,
                     "end": g_end, "id": gene.gene_id,
-                    "type": "gene", "strand": g_strand,
+                    "type": "gene", "score": ".", "strand": g_strand,
                 })
 
             for segment in gene.segments:
@@ -870,6 +870,7 @@ class ConstructSegments:
                         "end": segment.end,
                         "id": seg_id,
                         "type": "segment",
+                        "score": ".",
                         "strand": segment.strand,
                     })
 
@@ -914,6 +915,7 @@ class ConstructSegments:
                             "end": sub.end,
                             "id": sub_id,
                             "type": "subsegment",
+                            "score": ".",
                             "strand": sub.strand,
                         })
                         if rep_cs != "." and rep_cs not in seen_pas:
@@ -927,6 +929,7 @@ class ConstructSegments:
                                     "end": pe,
                                     "id": rep_cs,
                                     "type": "pas",
+                                    "score": ".",
                                     "strand": pstr,
                                 })
 
@@ -948,7 +951,9 @@ class ConstructSegments:
         if out_debug_prefix and debug_rows:
             debug_df = pd.DataFrame(
                 debug_rows,
-                columns=["chrom", "start", "end", "id", "type", "strand"],
+                columns=[
+                    "chrom", "start", "end", "id", "type", "score", "strand",
+                ],
             )
             for cat, suffix in (
                 ("gene", "genes"),
