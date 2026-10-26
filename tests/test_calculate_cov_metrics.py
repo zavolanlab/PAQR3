@@ -11,6 +11,7 @@ import pytest
 
 from paqr3.calculate_cov_metrics import (
     CalculateCoverages,
+    _assign_cluster_ids,
     _read_coverage_batch,
     compute_drops_and_usage,
     evaluate_all_pas_usage_patterns,
@@ -211,6 +212,43 @@ class TestEvaluateAllPasUsagePatterns:
         )
         if result is not None:
             assert set(result["unique_pas_ids"]) == {"pas1", "pas2"}
+
+
+# ---------------------------------------------------------------------------
+# PAS clustering (_assign_cluster_ids, cluster_distance)
+# ---------------------------------------------------------------------------
+
+
+class TestPasClustering:
+    def test_assign_cluster_ids_empty(self):
+        assert _assign_cluster_ids([], 250) == []
+
+    def test_assign_cluster_ids_breaks_on_distance_and_none(self):
+        # 100->150 merges; 150->600 is too far; None breaks on both sides.
+        centers = [100.0, 150.0, 600.0, None, 700.0]
+        assert _assign_cluster_ids(centers, 100) == [0, 0, 1, 2, 3]
+
+    def test_close_pas_clustered_with_invalid_inputs(self, caplog):
+        # pas1/pas2 centres are 100 bp apart -> one cluster; pas3 has a NaN
+        # start, so its centre is None and it forms its own cluster. NaN and
+        # non-numeric atlas_rpm values fall back to 0.
+        def sub(pas_id, cov, start, end, rpm):
+            s = _sub(pas_id, cov)
+            s.update(pas_start=start, pas_end=end, atlas_rpm=rpm)
+            return s
+
+        subsegments = [
+            sub("pas1", [100.0] * 20, 1000, 1010, float("nan")),
+            sub("pas2", [90.0] * 20, 1100, 1110, "bad"),
+            sub("pas3", [40.0] * 20, float("nan"), 2010, 5.0),
+            _sub(".", [5.0] * 20),
+        ]
+        with caplog.at_level("DEBUG", logger="paqr3.calculate_cov_metrics"):
+            evaluate_all_pas_usage_patterns(
+                subsegments, "seg1", debug=True, f_stat_threshold=5,
+                cluster_distance=250,
+            )
+        assert "Clustered 3 PAS → 2 clusters" in caplog.text
 
 
 # ---------------------------------------------------------------------------
