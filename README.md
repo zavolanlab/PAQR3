@@ -31,6 +31,7 @@ paqr3 segment \
   --pas-atlas/-pa                   PAS atlas BED file (required) \
   --output-dir/-o                   Output directory (required) \
   --downstream-exon-extension/-de   Bases to extend terminal exons (default: 200) \
+  --te-anchor-window/-tw            Terminal exons ending within this many bp of the most 3' one also define the TE segment (default: 50) \
   --merge-distance/-md              Merge PAS within this distance in bp (default: 5) \
   --emit/-e                         Additional outputs (see below) \
   --gzip/-g / --no-gzip             Gzip-compress TSV outputs (default: true) \

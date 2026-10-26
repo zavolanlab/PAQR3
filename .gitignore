@@ -172,7 +172,7 @@ cython_debug/
 
 .vscode
 data/*
-results/
-cluster_scripts/
-igv/
+results/*
+cluster_scripts/*
+igv/*
 CLAUDE.md

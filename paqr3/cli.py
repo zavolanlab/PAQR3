@@ -116,6 +116,17 @@ def _add_segment_args(p: argparse.ArgumentParser) -> None:
         help="Bases to extend terminal exons downstream (default: 200).",
     )
     p.add_argument(
+        "--te-anchor-window",
+        "-tw",
+        type=int,
+        default=50,
+        help=(
+            "Terminal exons whose 3' end lies within this many bp of the "
+            "gene's most 3' terminal exon also define its TE segment "
+            "(default: 50)."
+        ),
+    )
+    p.add_argument(
         "--merge-distance",
         "-md",
         type=int,
@@ -241,6 +252,7 @@ def _run_segment(args: argparse.Namespace) -> None:
         coverage_bw_neg="",
         output_dir=args.output_dir,
         downstream_exon_extension=args.downstream_exon_extension,
+        te_anchor_window=args.te_anchor_window,
         merge_distance=args.merge_distance,
         max_pas_count=0,
         emit=args.emit,
@@ -293,6 +305,7 @@ def _run_full(args: argparse.Namespace) -> None:
         coverage_bw_neg=args.coverage_neg,
         output_dir=args.output_dir,
         downstream_exon_extension=args.downstream_exon_extension,
+        te_anchor_window=args.te_anchor_window,
         merge_distance=args.merge_distance,
         max_pas_count=args.max_pas_count,
         f_stat_threshold=args.f_stat_threshold,

@@ -42,12 +42,42 @@ def _make_gene(
     return gene
 
 
+def _make_multi_tx_gene(
+    gene_id: str,
+    transcripts_exons: list[list[tuple[int, int]]],
+    strand: str = "+",
+    chrom: str = "chr1",
+) -> Gene:
+    """Build a Gene with one transcript per entry in transcripts_exons."""
+    gene = Gene(gene_id, attributes={"gene_id": gene_id})
+    for ti, exon_intervals in enumerate(transcripts_exons):
+        tx = Transcript(f"{gene_id}_tx{ti + 1}", strand)
+        for i, (start, end) in enumerate(exon_intervals):
+            tx.add_region(
+                Region(
+                    region_type="exon",
+                    chrom=chrom,
+                    start=start,
+                    end=end,
+                    strand=strand,
+                    exon_number=i + 1,
+                    attributes={
+                        "gene_id": gene_id,
+                        "transcript_id": f"{gene_id}_tx{ti + 1}",
+                    },
+                )
+            )
+        gene.add_transcript(tx)
+    return gene
+
+
 def _make_cs(**kwargs) -> ConstructSegments:
     """Return a ConstructSegments instance with dummy file paths."""
     return ConstructSegments(
         annotation_file=kwargs.get("annotation_file", ""),
         pas_atlas_file=kwargs.get("pas_atlas_file", ""),
         downstream_exon_extension=kwargs.get("downstream_exon_extension", 200),
+        te_anchor_window=kwargs.get("te_anchor_window", 50),
     )
 
 
@@ -197,7 +227,9 @@ class TestConstructSegments:
         _, gene = self._setup_and_run("g1", [(1000, 1500), (1700, 2000)])
         for seg in gene.segments:
             assert "segment_origin" in seg.attributes
-            assert seg.attributes["segment_origin"] in ("EX", "IN", "TE")
+            assert seg.attributes["segment_origin"] in (
+                "EX", "IN", "TE", "AL",
+            )
 
     def test_segment_numbers_sequential(self):
         _, gene = self._setup_and_run("g1", [(1000, 1500), (1700, 2000)])
@@ -224,6 +256,159 @@ class TestConstructSegments:
         _, gene = self._setup_and_run("g1", [(1000, 2000)])
         origins = [s.attributes.get("segment_origin") for s in gene.segments]
         assert all(o == "TE" for o in origins)
+
+    def _run_multi(
+        self, gene_id, transcripts_exons, strand="+", ext=200, window=50
+    ):
+        gene = _make_multi_tx_gene(gene_id, transcripts_exons, strand=strand)
+        cs = _make_cs(downstream_exon_extension=ext, te_anchor_window=window)
+        cs.genes = {gene_id: gene}
+        cs.define_exons_introns()
+        cs.construct_segments()
+        return cs, gene
+
+    def test_mixed_region_labelled_alternative(self):
+        # tx1/tx2 share a terminal-exon start at 1000 but end at 1100 (real
+        # intron 1100-1300 before resuming at 1300); tx3 reads straight
+        # through as one continuous exon 1000-1600 (intron retention).
+        # 1100-1300 is exonic for tx3 but intronic for tx1/tx2 -> AL.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(1000, 1100), (1300, 1400)],
+                [(1000, 1100), (1300, 1400)],
+                [(1000, 1600)],
+            ],
+        )
+        origins = {
+            (s.start, s.end): s.attributes.get("segment_origin")
+            for s in gene.segments
+        }
+        assert origins[(1100, 1300)] == "AL"
+
+    def test_only_one_te_segment_with_multiple_terminal_exons(self):
+        # Same gene as above: tx3 is single-exon, so the anchor comes from
+        # the spliced tx1/tx2 terminal exon (1300-1400); the island still
+        # runs to the gene's 3' end (1600) and is exactly one TE segment.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(1000, 1100), (1300, 1400)],
+                [(1000, 1100), (1300, 1400)],
+                [(1000, 1600)],
+            ],
+        )
+        te_segs = [
+            s
+            for s in gene.segments
+            if s.attributes.get("segment_origin") == "TE"
+        ]
+        assert len(te_segs) == 1
+        assert (te_segs[0].start, te_segs[0].end) == (1300, 1600)
+
+    def test_shared_exon_before_alternative_not_terminal(self):
+        # The shared 1000-1100 span (exonic for every transcript, upstream
+        # of the TE island) must be plain EX, not TE and not AL.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(1000, 1100), (1300, 1400)],
+                [(1000, 1100), (1300, 1400)],
+                [(1000, 1600)],
+            ],
+        )
+        origins = {
+            (s.start, s.end): s.attributes.get("segment_origin")
+            for s in gene.segments
+        }
+        assert origins[(1000, 1100)] == "EX"
+
+    def test_nested_exon_with_no_competing_intron_stays_one_te(self):
+        # A second transcript's exon fully nested inside the first
+        # transcript's single exon, with no intron anywhere in the gene,
+        # must not fragment the terminal exon: still exactly one segment.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(1000, 2000)],
+                [(1400, 1500)],
+            ],
+        )
+        assert len(gene.segments) == 1
+        assert gene.segments[0].attributes.get("segment_origin") == "TE"
+
+    @staticmethod
+    def _origins(gene):
+        return {
+            (s.start, s.end): s.attributes.get("segment_origin")
+            for s in gene.segments
+        }
+
+    def test_intron_inside_anchor_does_not_split_te(self):
+        # ADSL-like: tx2 splices out 600-900, which lies inside tx1's long
+        # terminal exon; the whole anchor exon stays one TE segment.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(100, 200), (500, 1500)],
+                [(100, 200), (500, 600), (900, 1000)],
+            ],
+        )
+        assert self._origins(gene) == {
+            (100, 200): "EX",
+            (200, 500): "IN",
+            (500, 1500): "TE",
+        }
+
+    def test_retained_intron_te_ending_inside_anchor_minus(self):
+        # ATP5F1E-like (- strand): tx2's terminal exon (900-1600) retains
+        # tx1's intron and ends inside tx1's anchor (100-1000). It must not
+        # widen the island; its upstream body is AL, the shared exon EX.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(100, 1000), (1500, 1600)],
+                [(900, 1600), (2000, 2100)],
+            ],
+            strand="-",
+        )
+        origins = self._origins(gene)
+        assert origins[(100, 1000)] == "TE"
+        assert origins[(1000, 1500)] == "AL"
+        assert origins[(1500, 1600)] == "EX"
+        assert list(origins.values()).count("TE") == 1
+
+    def test_upstream_te_three_prime_end_is_not_a_boundary(self):
+        # CTSZ-like: tx2 ends at 750, inside tx1's intron 600-1000. No cut
+        # at 750, so its PAS shares a segment with the drop after it, and
+        # that segment (exonic in tx2, intronic in tx1) is AL.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(100, 200), (500, 600), (1000, 2000)],
+                [(100, 200), (500, 750)],
+            ],
+        )
+        origins = self._origins(gene)
+        assert origins[(600, 1000)] == "AL"
+        assert not any(750 in (s, e) for s, e in origins)
+        assert origins[(1000, 2000)] == "TE"
+
+    @pytest.mark.parametrize("window, te", [(50, (1000, 2030)),
+                                            (0, (1900, 2030))])
+    def test_anchor_window_merges_near_three_prime_ends(self, window, te):
+        # tx2's short last exon ends 30 bp past tx1's long one: within the
+        # window the long exon still defines the island, without it not.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(100, 200), (1000, 2000)],
+                [(100, 200), (1200, 1300), (1900, 2030)],
+            ],
+            window=window,
+        )
+        te_segs = [k for k, v in self._origins(gene).items() if v == "TE"]
+        assert te_segs == [te]
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +549,12 @@ class TestAssignSegmentIds:
         cs.genes = {"ENSG1": self._gene_with_segments(["TE"])}
         seg_id = cs._assign_segment_ids()[("ENSG1", 1)]
         assert ":T" in seg_id
+
+    def test_alternative_prefix(self):
+        cs = _make_cs()
+        cs.genes = {"ENSG1": self._gene_with_segments(["AL"])}
+        seg_id = cs._assign_segment_ids()[("ENSG1", 1)]
+        assert ":A" in seg_id
 
     def test_counter_increments_per_type(self):
         cs = _make_cs()

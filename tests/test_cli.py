@@ -116,6 +116,20 @@ class TestSegmentArgParsing:
             _, kwargs = mock_cls.call_args
             assert kwargs["merge_distance"] == 10
 
+    def test_te_anchor_window_passed(self, test_gtf, test_atlas, tmp_path):
+        with patch("paqr3.cli.PAQR3") as mock_cls:
+            mock_instance = MagicMock()
+            mock_cls.return_value = mock_instance
+            _run([
+                "segment",
+                "--annotation", test_gtf,
+                "--pas-atlas", test_atlas,
+                "--output-dir", str(tmp_path),
+                "--te-anchor-window", "0",
+            ])
+            _, kwargs = mock_cls.call_args
+            assert kwargs["te_anchor_window"] == 0
+
 
 # ---------------------------------------------------------------------------
 # Argument parsing — quant subcommand
