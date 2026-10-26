@@ -2,11 +2,20 @@
 
 import gzip
 import os
+from unittest.mock import patch
 
 import pandas as pd
+import pyBigWig
 import pytest
 
-from paqr3.paqr3 import PAQR3, _load_chrom_sizes, _resolve_emit, _write_tsv
+from paqr3.paqr3 import (
+    PAQR3,
+    _diagnose_bigwig_overlap,
+    _load_chrom_sizes,
+    _resolve_emit,
+    _write_bigwig,
+    _write_tsv,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +271,7 @@ class TestRunQuant:
             sep="\t",
         )
         for col in ("chr", "start", "end", "strand", "segment_id",
-                    "rna_sum_drop_cov", "f_stat", "p_value"):
+                    "rna_sum_drop_cov", "f_stat", "p_value", "rna_monotone"):
             assert col in df.columns
 
     def test_subsegment_results_columns(
@@ -390,3 +399,288 @@ class TestRunFull:
         paqr3.run_full(sample_name="test_sample")
         results_dir = tmp_path / "test_sample_results"
         assert (results_dir / "test_sample_pas_results.tsv.gz").exists()
+
+    def test_inferred_sample_name_from_stems(
+        self, tmp_path, test_gtf, test_atlas, test_bw_pos, test_bw_neg
+    ):
+        paqr3 = PAQR3(
+            annotation_file=test_gtf,
+            pas_atlas_file=test_atlas,
+            coverage_bw_pos=test_bw_pos,
+            coverage_bw_neg=test_bw_neg,
+            output_dir=str(tmp_path),
+            downstream_exon_extension=200,
+            merge_distance=5,
+            max_pas_count=10,
+            use_gzip=False,
+        )
+        paqr3.run_full()  # no sample_name → inferred from BigWig stem
+        results_dir = tmp_path / "test_data_results"
+        assert results_dir.exists()
+
+    def test_mismatched_stems_raises(
+        self, tmp_path, test_gtf, test_atlas, test_bw_pos
+    ):
+        paqr3 = PAQR3(
+            annotation_file=test_gtf,
+            pas_atlas_file=test_atlas,
+            coverage_bw_pos=test_bw_pos,
+            coverage_bw_neg="different_name.bw",
+            output_dir=str(tmp_path),
+            downstream_exon_extension=200,
+            merge_distance=5,
+            max_pas_count=10,
+        )
+        with pytest.raises(ValueError, match="sample name"):
+            paqr3.run_full()
+
+
+# ---------------------------------------------------------------------------
+# _write_tsv gzip fallback (lines 98-99)
+# ---------------------------------------------------------------------------
+
+
+class TestWriteTsvGzipFallback:
+    def test_fallback_to_stdlib_gzip(self, tmp_path):
+        df = pd.DataFrame({"x": [1], "y": ["a"]})
+        path = str(tmp_path / "out.tsv.gz")
+        with patch("paqr3.paqr3.shutil.which", return_value=None):
+            _write_tsv(df, path, compress=True)
+        with gzip.open(path, "rt") as fh:
+            header = fh.readline().strip()
+        assert header == "x\ty"
+
+
+# ---------------------------------------------------------------------------
+# _write_bigwig (lines 119-139)
+# ---------------------------------------------------------------------------
+
+
+class TestWriteBigwig:
+    def test_empty_df_not_written(self, tmp_path):
+        df = pd.DataFrame({
+            "chrom": ["chr1"],
+            "start": [100],
+            "end": [200],
+            "val": [float("nan")],
+        })
+        path = str(tmp_path / "out.bw")
+        _write_bigwig(df, "val", {"chr1": 1000}, path)
+        assert not os.path.exists(path)
+
+    def test_nonempty_df_written(self, tmp_path):
+        df = pd.DataFrame({
+            "chrom": ["chr1"],
+            "start": [100],
+            "end": [200],
+            "val": [5.0],
+        })
+        path = str(tmp_path / "out.bw")
+        _write_bigwig(df, "val", {"chr1": 1000}, path)
+        assert os.path.exists(path)
+        bw = pyBigWig.open(path)
+        assert bw.stats("chr1", 100, 200)[0] == pytest.approx(5.0)
+        bw.close()
+
+    def test_overlapping_entries_raise_and_log(self, tmp_path, caplog):
+        """Overlapping intervals trigger diagnostic logging then re-raise."""
+        import logging
+        df = pd.DataFrame({
+            "chrom": ["chr1", "chr1"],
+            "start": [100, 150],
+            "end": [200, 250],
+            "val": [1.0, 2.0],
+        })
+        path = str(tmp_path / "overlap.bw")
+        with caplog.at_level(logging.ERROR, logger="paqr3.paqr3"):
+            with pytest.raises(RuntimeError):
+                _write_bigwig(df, "val", {"chr1": 1000}, path)
+        assert any("overlaps previous entry" in r.message for r in caplog.records)
+
+
+class TestDiagnoseBigwigOverlap:
+    def test_overlap_logged(self, caplog):
+        import logging
+        with caplog.at_level(logging.ERROR, logger="paqr3.paqr3"):
+            _diagnose_bigwig_overlap(
+                "chr1",
+                starts=[100, 150],
+                ends=[200, 250],
+                values=[1.0, 2.0],
+                chrom_sizes={"chr1": 1000},
+                path="test.bw",
+            )
+        assert any("overlaps previous entry" in r.message for r in caplog.records)
+
+    def test_zero_length_logged(self, caplog):
+        import logging
+        with caplog.at_level(logging.ERROR, logger="paqr3.paqr3"):
+            _diagnose_bigwig_overlap(
+                "chr1",
+                starts=[100],
+                ends=[100],
+                values=[1.0],
+                chrom_sizes={"chr1": 1000},
+                path="test.bw",
+            )
+        assert any("zero/negative length" in r.message for r in caplog.records)
+
+    def test_exceeds_chrom_size_logged(self, caplog):
+        import logging
+        with caplog.at_level(logging.ERROR, logger="paqr3.paqr3"):
+            _diagnose_bigwig_overlap(
+                "chr1",
+                starts=[900],
+                ends=[1100],
+                values=[1.0],
+                chrom_sizes={"chr1": 1000},
+                path="test.bw",
+            )
+        assert any("exceeds chrom size" in r.message for r in caplog.records)
+
+    def test_many_violations_truncated(self, caplog):
+        """More than MAX_REPORT violations shows a 'more violations' message."""
+        import logging
+        # 10 overlapping entries all starting at 0
+        starts = [0] * 10
+        ends = [100] * 10
+        values = [float(i) for i in range(10)]
+        with caplog.at_level(logging.ERROR, logger="paqr3.paqr3"):
+            _diagnose_bigwig_overlap(
+                "chr1", starts, ends, values, {"chr1": 1000}, "test.bw"
+            )
+        assert any("more violation" in r.message for r in caplog.records)
+
+    def test_no_chrom_size_skips_boundary_check(self, caplog):
+        """When chrom is not in chrom_sizes, no boundary violation is logged."""
+        import logging
+        with caplog.at_level(logging.ERROR, logger="paqr3.paqr3"):
+            _diagnose_bigwig_overlap(
+                "chrX",
+                starts=[100],
+                ends=[9999],
+                values=[1.0],
+                chrom_sizes={},
+                path="test.bw",
+            )
+        assert not any("exceeds chrom size" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# _emit_bigwigs + run_quant inferred sample name + pas_coords=None
+# (lines 211-232, 288, 465, 507)
+# ---------------------------------------------------------------------------
+
+
+class TestRunQuantExtra:
+    @pytest.fixture(scope="class")
+    def segments_tsv(self, tmp_path_factory, test_gtf, test_atlas):
+        out_dir = tmp_path_factory.mktemp("seg2")
+        paqr3 = PAQR3(
+            annotation_file=test_gtf,
+            pas_atlas_file=test_atlas,
+            coverage_bw_pos="",
+            coverage_bw_neg="",
+            output_dir=str(out_dir),
+            downstream_exon_extension=200,
+            merge_distance=5,
+            max_pas_count=10,
+        )
+        return paqr3.run_segment()
+
+    def test_inferred_sample_name(
+        self, tmp_path, segments_tsv, test_bw_pos, test_bw_neg
+    ):
+        paqr3 = PAQR3(
+            annotation_file="",
+            pas_atlas_file="",
+            coverage_bw_pos=test_bw_pos,
+            coverage_bw_neg=test_bw_neg,
+            output_dir=str(tmp_path),
+            downstream_exon_extension=200,
+            merge_distance=5,
+            max_pas_count=10,
+            use_gzip=False,
+        )
+        paqr3.run_quant(segments_tsv)  # no sample_name
+        assert (tmp_path / "test_data_results").exists()
+
+    def test_run_quant_without_pas_coords(
+        self, tmp_path, segments_tsv, test_bw_pos, test_bw_neg
+    ):
+        seg_df = pd.read_csv(segments_tsv, sep="\t")
+        no_coords = str(tmp_path / "no_coords.tsv")
+        seg_df.drop(
+            columns=["pas_start", "pas_end"], errors="ignore"
+        ).to_csv(no_coords, sep="\t", index=False)
+
+        paqr3 = PAQR3(
+            annotation_file="",
+            pas_atlas_file="",
+            coverage_bw_pos=test_bw_pos,
+            coverage_bw_neg=test_bw_neg,
+            output_dir=str(tmp_path),
+            downstream_exon_extension=200,
+            merge_distance=5,
+            max_pas_count=10,
+            use_gzip=False,
+        )
+        paqr3.run_quant(no_coords, sample_name="noseg_sample")
+        results_dir = tmp_path / "noseg_sample_results"
+        assert (results_dir / "noseg_sample_pas_results.tsv").exists()
+
+    def _chr_sizes_path(self, tmp_path, bw_path):
+        bw = pyBigWig.open(bw_path)
+        chroms = bw.chroms()
+        bw.close()
+        path = str(tmp_path / "chrom.sizes")
+        with open(path, "w") as fh:
+            for chrom, size in chroms.items():
+                fh.write(f"{chrom}\t{size}\n")
+        return path
+
+    def test_emit_bigwigs_mean_cov(
+        self, tmp_path, segments_tsv, test_bw_pos, test_bw_neg
+    ):
+        chr_sizes_path = self._chr_sizes_path(tmp_path, test_bw_pos)
+        paqr3 = PAQR3(
+            annotation_file="",
+            pas_atlas_file="",
+            coverage_bw_pos=test_bw_pos,
+            coverage_bw_neg=test_bw_neg,
+            output_dir=str(tmp_path),
+            downstream_exon_extension=200,
+            merge_distance=5,
+            max_pas_count=10,
+            emit=["mean_cov"],
+            chr_sizes_file=chr_sizes_path,
+            use_gzip=False,
+        )
+        paqr3.run_quant(segments_tsv, sample_name="bw_sample")
+        results_dir = tmp_path / "bw_sample_results"
+        assert (
+            (results_dir / "bw_sample_mean_cov.pos.bw").exists()
+            or (results_dir / "bw_sample_mean_cov.neg.bw").exists()
+        )
+
+    def test_emit_bigwigs_observed_uses_pas_coords(
+        self, tmp_path, segments_tsv, test_bw_pos, test_bw_neg
+    ):
+        # emit="observed" uses coord_type="pas" → line 223 in _emit_bigwigs
+        chr_sizes_path = self._chr_sizes_path(tmp_path, test_bw_pos)
+        paqr3 = PAQR3(
+            annotation_file="",
+            pas_atlas_file="",
+            coverage_bw_pos=test_bw_pos,
+            coverage_bw_neg=test_bw_neg,
+            output_dir=str(tmp_path),
+            downstream_exon_extension=200,
+            merge_distance=5,
+            max_pas_count=10,
+            emit=["observed"],
+            chr_sizes_file=chr_sizes_path,
+            use_gzip=False,
+        )
+        paqr3.run_quant(segments_tsv, sample_name="obs_sample")
+        # BigWig may or may not exist depending on whether any PAS pass,
+        # but the code path (line 223) must be executed without error.

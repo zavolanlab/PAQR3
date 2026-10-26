@@ -42,6 +42,35 @@ def _make_gene(
     return gene
 
 
+def _make_multi_tx_gene(
+    gene_id: str,
+    transcripts_exons: list[list[tuple[int, int]]],
+    strand: str = "+",
+    chrom: str = "chr1",
+) -> Gene:
+    """Build a Gene with one transcript per entry in transcripts_exons."""
+    gene = Gene(gene_id, attributes={"gene_id": gene_id})
+    for ti, exon_intervals in enumerate(transcripts_exons):
+        tx = Transcript(f"{gene_id}_tx{ti + 1}", strand)
+        for i, (start, end) in enumerate(exon_intervals):
+            tx.add_region(
+                Region(
+                    region_type="exon",
+                    chrom=chrom,
+                    start=start,
+                    end=end,
+                    strand=strand,
+                    exon_number=i + 1,
+                    attributes={
+                        "gene_id": gene_id,
+                        "transcript_id": f"{gene_id}_tx{ti + 1}",
+                    },
+                )
+            )
+        gene.add_transcript(tx)
+    return gene
+
+
 def _make_cs(**kwargs) -> ConstructSegments:
     """Return a ConstructSegments instance with dummy file paths."""
     return ConstructSegments(
@@ -197,7 +226,9 @@ class TestConstructSegments:
         _, gene = self._setup_and_run("g1", [(1000, 1500), (1700, 2000)])
         for seg in gene.segments:
             assert "segment_origin" in seg.attributes
-            assert seg.attributes["segment_origin"] in ("EX", "IN", "TE")
+            assert seg.attributes["segment_origin"] in (
+                "EX", "IN", "TE", "AL",
+            )
 
     def test_segment_numbers_sequential(self):
         _, gene = self._setup_and_run("g1", [(1000, 1500), (1700, 2000)])
@@ -224,6 +255,173 @@ class TestConstructSegments:
         _, gene = self._setup_and_run("g1", [(1000, 2000)])
         origins = [s.attributes.get("segment_origin") for s in gene.segments]
         assert all(o == "TE" for o in origins)
+
+    def _run_multi(
+        self, gene_id, transcripts_exons, strand="+", ext=200
+    ):
+        gene = _make_multi_tx_gene(gene_id, transcripts_exons, strand=strand)
+        cs = _make_cs(downstream_exon_extension=ext)
+        cs.genes = {gene_id: gene}
+        cs.define_exons_introns()
+        cs.construct_segments()
+        return cs, gene
+
+    def test_mixed_region_labelled_alternative(self):
+        # tx1/tx2 share a first exon 1000-1100 (real intron 1100-1300
+        # before resuming at 1300); tx3 reads straight through as one
+        # continuous exon 1000-1350 (intron retention), ending inside the
+        # anchor. 1100-1300 is exonic for tx3 but intronic for tx1/tx2.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(1000, 1100), (1300, 1400)],
+                [(1000, 1100), (1300, 1400)],
+                [(1000, 1350)],
+            ],
+        )
+        origins = {
+            (s.start, s.end): s.attributes.get("segment_origin")
+            for s in gene.segments
+        }
+        assert origins[(1100, 1300)] == "AL"
+
+    def test_only_one_te_segment_with_multiple_terminal_exons(self):
+        # Same gene as above: tx3's terminal exon ends short of the gene's
+        # 3' end (1400), so only tx1/tx2's last exon defines the island
+        # and there is exactly one TE segment.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(1000, 1100), (1300, 1400)],
+                [(1000, 1100), (1300, 1400)],
+                [(1000, 1350)],
+            ],
+        )
+        te_segs = [
+            s
+            for s in gene.segments
+            if s.attributes.get("segment_origin") == "TE"
+        ]
+        assert len(te_segs) == 1
+        assert (te_segs[0].start, te_segs[0].end) == (1300, 1400)
+
+    def test_shared_exon_before_alternative_not_terminal(self):
+        # The shared 1000-1100 span (exonic for every transcript, upstream
+        # of the TE island) must be plain EX, not TE and not AL.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(1000, 1100), (1300, 1400)],
+                [(1000, 1100), (1300, 1400)],
+                [(1000, 1350)],
+            ],
+        )
+        origins = {
+            (s.start, s.end): s.attributes.get("segment_origin")
+            for s in gene.segments
+        }
+        assert origins[(1000, 1100)] == "EX"
+
+    def test_nested_exon_with_no_competing_intron_stays_one_te(self):
+        # A second transcript's exon fully nested inside the first
+        # transcript's single exon, with no intron anywhere in the gene,
+        # must not fragment the terminal exon: still exactly one segment.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(1000, 2000)],
+                [(1400, 1500)],
+            ],
+        )
+        assert len(gene.segments) == 1
+        assert gene.segments[0].attributes.get("segment_origin") == "TE"
+
+    @staticmethod
+    def _origins(gene):
+        return {
+            (s.start, s.end): s.attributes.get("segment_origin")
+            for s in gene.segments
+        }
+
+    def test_intron_inside_anchor_does_not_split_te(self):
+        # ADSL-like: tx2 splices out 600-900, which lies inside tx1's long
+        # terminal exon; the whole anchor exon stays one TE segment.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(100, 200), (500, 1500)],
+                [(100, 200), (500, 600), (900, 1000)],
+            ],
+        )
+        assert self._origins(gene) == {
+            (100, 200): "EX",
+            (200, 500): "IN",
+            (500, 1500): "TE",
+        }
+
+    def test_retained_intron_te_ending_inside_anchor_minus(self):
+        # ATP5F1E-like (- strand): tx2's terminal exon (900-1600) retains
+        # tx1's intron and ends inside tx1's anchor (100-1000). It must not
+        # widen the island; its upstream body is AL, the shared exon EX.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(100, 1000), (1500, 1600)],
+                [(900, 1600), (2000, 2100)],
+            ],
+            strand="-",
+        )
+        origins = self._origins(gene)
+        assert origins[(100, 1000)] == "TE"
+        assert origins[(1000, 1500)] == "AL"
+        assert origins[(1500, 1600)] == "EX"
+        assert list(origins.values()).count("TE") == 1
+
+    def test_upstream_te_three_prime_end_is_not_a_boundary(self):
+        # CTSZ-like: tx2 ends at 750, inside tx1's intron 600-1000. No cut
+        # at 750, so its PAS shares a segment with the drop after it, and
+        # that segment (exonic in tx2, intronic in tx1) is AL.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(100, 200), (500, 600), (1000, 2000)],
+                [(100, 200), (500, 750)],
+            ],
+        )
+        origins = self._origins(gene)
+        assert origins[(600, 1000)] == "AL"
+        assert not any(750 in (s, e) for s, e in origins)
+        assert origins[(1000, 2000)] == "TE"
+
+    def test_anchor_requires_exact_three_prime_end(self):
+        # tx2's short last exon ends 30 bp past tx1's long one, so it alone
+        # is the anchor; tx1's upstream body does not join the island.
+        _, gene = self._run_multi(
+            "g1",
+            [
+                [(100, 200), (1000, 2000)],
+                [(100, 200), (1200, 1300), (1900, 2030)],
+            ],
+        )
+        te_segs = [k for k, v in self._origins(gene).items() if v == "TE"]
+        assert te_segs == [(1900, 2030)]
+
+    def test_anchor_uses_unextended_three_prime_end(self):
+        # BHLHE23-like (- strand): g2's two single-exon transcripts end 50 bp
+        # apart (1000 vs 1050); extension is capped at g1's end (900), so
+        # both extended exons start at 900. Only tx1 reaches the annotated
+        # 3' end, so the island stops at its 5' edge (2000), not tx2's.
+        g1 = _make_gene("g1", [(100, 900)], strand="-")
+        g2 = _make_multi_tx_gene(
+            "g2", [[(1000, 2000)], [(1050, 2070)]], strand="-"
+        )
+        cs = _make_cs(downstream_exon_extension=200)
+        cs.genes = {"g1": g1, "g2": g2}
+        cs.extend_gene_coordinates()
+        cs.extend_exon_downstream()
+        cs.define_exons_introns()
+        cs.construct_segments()
+        assert self._origins(g2) == {(900, 2000): "TE", (2000, 2070): "EX"}
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +563,12 @@ class TestAssignSegmentIds:
         seg_id = cs._assign_segment_ids()[("ENSG1", 1)]
         assert ":T" in seg_id
 
+    def test_alternative_prefix(self):
+        cs = _make_cs()
+        cs.genes = {"ENSG1": self._gene_with_segments(["AL"])}
+        seg_id = cs._assign_segment_ids()[("ENSG1", 1)]
+        assert ":A" in seg_id
+
     def test_counter_increments_per_type(self):
         cs = _make_cs()
         cs.genes = {"ENSG1": self._gene_with_segments(["EX", "IN", "EX", "TE"])}
@@ -461,3 +665,235 @@ class TestComputeOnRealData:
         cs.run(out_tsv=None, merge_distance=5)
         assert cs.pas_df is not None
         assert len(cs.genes) > 0
+
+    def test_debug_beds_written(self, tmp_path, test_gtf, test_atlas):
+        prefix = str(tmp_path / "dbg")
+        cs = ConstructSegments(test_gtf, test_atlas, downstream_exon_extension=200)
+        cs.run(out_tsv=None, merge_distance=5, out_debug_prefix=prefix)
+        for suffix in ("_genes.bed", "_segments.bed",
+                       "_subsegments.bed", "_pas.bed"):
+            assert os.path.exists(prefix + suffix)
+
+    def test_write_segments_pas_to_bed(self, tmp_path, test_gtf, test_atlas):
+        cs = ConstructSegments(test_gtf, test_atlas, downstream_exon_extension=200)
+        cs.compute(merge_distance=5)
+        # Inject a gene with no transcripts to cover the else branch (line 1008)
+        cs.genes["_EMPTY_GENE_"] = Gene("_EMPTY_GENE_")
+        out_genes = str(tmp_path / "genes.bed")
+        out_segs = str(tmp_path / "segs.bed")
+        out_subs = str(tmp_path / "subs.bed")
+        out_pas = str(tmp_path / "pas.bed")
+        cs.write_segments_pas_to_bed(out_genes, out_segs, out_subs, out_pas)
+        for path in (out_genes, out_segs, out_subs, out_pas):
+            assert os.path.exists(path)
+
+    def test_zero_length_subsegment_skipped(self, tmp_path, test_gtf, test_atlas):
+        cs = ConstructSegments(test_gtf, test_atlas, downstream_exon_extension=200)
+        cs.compute(merge_distance=5)
+        # Inject a zero-length subsegment into the first segment that has subs.
+        for gene in cs.genes.values():
+            for seg in gene.segments:
+                if seg.subsegments:
+                    zero_sub = Region(
+                        region_type="subsegment",
+                        chrom="chr1",
+                        start=1000,
+                        end=1000,
+                        strand="+",
+                        attributes={"subsegment_number": 999, "pas_id": "."},
+                    )
+                    seg.subsegments.insert(0, zero_sub)
+                    break
+            else:
+                continue
+            break
+        df = cs.create_subsegments_dataframe()
+        assert (df["subsegment_id"].str.endswith(":999")).sum() == 0
+
+
+# ---------------------------------------------------------------------------
+# parse_gtf_to_genes: skip paths (lines 123, 133, 153)
+# ---------------------------------------------------------------------------
+
+
+class TestParseGtfSkips:
+    def _cs(self):
+        return _make_cs()
+
+    def test_nan_seqname_gene_skipped(self):
+        import numpy as np
+        cs = self._cs()
+        gtf_df = pd.DataFrame([{
+            "feature": "gene", "gene_id": "g_nan",
+            "seqname": np.nan,
+            "source": ".", "start": 1, "end": 100,
+            "score": ".", "strand": "+",
+        }])
+        result = cs.parse_gtf_to_genes(gtf_df)
+        assert "g_nan" not in result
+
+    def test_orphan_transcript_skipped(self):
+        cs = self._cs()
+        gtf_df = pd.DataFrame([{
+            "feature": "transcript",
+            "gene_id": "NONEXISTENT", "transcript_id": "t1",
+            "seqname": "chr1", "source": ".", "start": 1, "end": 100,
+            "score": ".", "strand": "+",
+        }])
+        result = cs.parse_gtf_to_genes(gtf_df)
+        assert "NONEXISTENT" not in result
+
+    def test_orphan_exon_skipped(self):
+        cs = self._cs()
+        gtf_df = pd.DataFrame([
+            {"feature": "gene", "gene_id": "g1",
+             "seqname": "chr1", "source": ".", "start": 1, "end": 200,
+             "score": ".", "strand": "+"},
+            {"feature": "exon", "gene_id": "g1",
+             "transcript_id": "ORPHAN_TX",
+             "seqname": "chr1", "source": ".", "start": 10, "end": 50,
+             "score": ".", "strand": "+"},
+        ])
+        result = cs.parse_gtf_to_genes(gtf_df)
+        assert "g1" in result
+        assert not result["g1"].transcripts
+
+
+# ---------------------------------------------------------------------------
+# extend_gene_coordinates: skip paths (lines 205, 208, 237)
+# ---------------------------------------------------------------------------
+
+
+class TestExtendGeneCoordinatesSkips:
+    def test_gene_no_transcripts_skipped(self):
+        cs = _make_cs()
+        cs.genes = {"empty": Gene("empty")}
+        cs.extend_gene_coordinates()  # must not crash (line 205)
+
+    def test_gene_with_empty_transcript_skipped(self):
+        cs = _make_cs()
+        gene = Gene("g1", attributes={})
+        tx = Transcript("t1", "+")  # no regions → chrom is None
+        gene.add_transcript(tx)
+        cs.genes = {"g1": gene}
+        cs.extend_gene_coordinates()  # must not crash (line 208)
+
+    @pytest.mark.parametrize("strand", ["+", "-"])
+    def test_extension_book_ends_neighbour(self, strand):
+        # The downstream gene is 100 bp away (< 200 bp extension): the
+        # extended gene must end exactly at it on both strands, no gap.
+        if strand == "+":
+            genes = {"a": _make_gene("a", [(0, 1000)], "+"),
+                     "b": _make_gene("b", [(1100, 2000)], "+")}
+        else:
+            genes = {"a": _make_gene("a", [(0, 1000)], "-"),
+                     "b": _make_gene("b", [(1100, 2000)], "-")}
+        cs = _make_cs(downstream_exon_extension=200)
+        cs.genes = genes
+        cs.extend_gene_coordinates()
+        if strand == "+":
+            assert genes["a"].attributes["end"] == 1100
+        else:
+            assert genes["b"].attributes["start"] == 1000
+
+    def test_overlapping_minus_genes_while_loop(self):
+        cs = _make_cs(downstream_exon_extension=200)
+        gene1 = _make_gene("g1", [(1000, 2000)], strand="-")
+        gene2 = _make_gene("g2", [(1800, 3000)], strand="-")
+        cs.genes = {"g1": gene1, "g2": gene2}
+        cs.extend_gene_coordinates()  # line 237 hit: prev_end >= gene_start
+
+
+# ---------------------------------------------------------------------------
+# extend_exon_downstream: skip paths (lines 251, 255, 277-278, 297-298)
+# ---------------------------------------------------------------------------
+
+
+class TestExtendExonDownstreamSkips:
+    def test_gene_no_transcripts_skipped(self):
+        cs = _make_cs()
+        cs.genes = {"empty": Gene("empty")}
+        cs.extend_exon_downstream()  # line 251
+
+    def test_transcript_no_regions_skipped(self):
+        cs = _make_cs()
+        gene = Gene("g1", attributes={"start": 0, "end": 2000})
+        tx = Transcript("t1", "+")
+        gene.add_transcript(tx)
+        cs.genes = {"g1": gene}
+        cs.extend_exon_downstream()  # line 255
+
+    def test_plus_gene_minus_strand_exon(self):
+        cs = _make_cs(downstream_exon_extension=200)
+        gene = Gene("g1", attributes={"start": 800, "end": 2200})
+        tx = Transcript("t1", "+")
+        tx.add_region(Region(
+            region_type="exon", chrom="chr1",
+            start=2000, end=2100, strand="-",
+            attributes={"gene_id": "g1", "is_terminal_exon": True},
+        ))
+        gene.add_transcript(tx)
+        cs.genes = {"g1": gene}
+        cs.extend_exon_downstream()  # lines 277-278
+
+    def test_minus_gene_plus_strand_exon(self):
+        cs = _make_cs(downstream_exon_extension=200)
+        gene = Gene("g1", attributes={"start": 800, "end": 2200})
+        tx = Transcript("t1", "-")
+        tx.add_region(Region(
+            region_type="exon", chrom="chr1",
+            start=1000, end=1100, strand="+",
+            attributes={"gene_id": "g1", "is_terminal_exon": True},
+        ))
+        gene.add_transcript(tx)
+        cs.genes = {"g1": gene}
+        cs.extend_exon_downstream()  # lines 297-298
+
+
+# ---------------------------------------------------------------------------
+# construct_segments: empty gene skip (line 366)
+# ---------------------------------------------------------------------------
+
+
+class TestConstructSegmentsSkip:
+    def test_empty_gene_skipped(self):
+        cs = _make_cs()
+        cs.genes = {"empty": Gene("empty")}
+        cs.construct_segments()  # line 366, must not crash
+
+
+# ---------------------------------------------------------------------------
+# process_pas_atlas: error paths (lines 522-533, 536-537, 569-574)
+# ---------------------------------------------------------------------------
+
+
+class TestProcessPasAtlasErrorPaths:
+    def test_invalid_rpm_value_defaults_to_zero(self, tmp_path):
+        bed = str(tmp_path / "invalid_rpm.bed")
+        _write_bed(bed, [["chr1", 100, 200, "cs1", "INVALID", "+"]])
+        cs = ConstructSegments("", bed, 200)
+        cs.process_pas_atlas()
+        assert cs.pas_df is not None
+        assert cs.pas_df.iloc[0]["atlas_rpm"] == pytest.approx(0.0)
+
+    def test_three_col_bed_defaults(self, tmp_path):
+        bed = str(tmp_path / "short.bed")
+        _write_bed(bed, [["chr1", 100, 200]])
+        cs = ConstructSegments("", bed, 200)
+        cs.process_pas_atlas()
+        assert cs.pas_df is not None
+        assert cs.pas_df.iloc[0]["atlas_rpm"] == pytest.approx(0.0)
+
+    def test_mid_loop_flush_with_dot_name(self, tmp_path):
+        # First site "." name, then a non-mergeable second site
+        # → mid-loop flush with rep_name="." → lines 569-574
+        bed = str(tmp_path / "dot_name.bed")
+        _write_bed(bed, [
+            ["chr1", 100, 110, ".", 50.0, "+"],
+            ["chr1", 300, 310, "cs2", 60.0, "+"],
+        ])
+        cs = ConstructSegments("", bed, 200)
+        cs.process_pas_atlas(merge_distance=5)
+        assert cs.pas_df is not None
+        assert len(cs.pas_df) == 2
+        assert cs.pas_df.iloc[0]["rep_cs"].startswith("chr1:")

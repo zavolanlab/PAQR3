@@ -1,14 +1,22 @@
 """Unit tests for paqr3.calculate_cov_metrics."""
 
+import collections
+import json
+import os
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from paqr3.calculate_cov_metrics import (
     CalculateCoverages,
+    _assign_cluster_ids,
+    _read_coverage_batch,
     compute_drops_and_usage,
     evaluate_all_pas_usage_patterns,
     json_serial,
+    process_segment,
 )
 
 
@@ -89,6 +97,39 @@ class TestEvaluateAllPasUsagePatterns:
         result = evaluate_all_pas_usage_patterns(subsegments, "seg1")
         assert result is not None
         assert result["pas_usage"]["pas1"] == 0.0
+
+    def test_single_pas_zero_cov_with_nonzero_trailing(self):
+        # pas1 has zero coverage but trailing has non-zero → avoids early exit
+        # forces the else branch on line 107 (mu == 0 for single PAS)
+        subsegments = [
+            _sub("pas1", [0.0, 0.0]),
+            _sub(".", [5.0, 5.0]),
+        ]
+        result = evaluate_all_pas_usage_patterns(subsegments, "seg1")
+        assert result is not None
+        assert result["pas_usage"]["pas1"] == 0.0
+
+    def test_single_pas_trailing_higher_than_pas_usage_zero(self):
+        # Trailing coverage exceeds PAS coverage (rising profile) → no
+        # genuine poly(A) signal → usage=0 and rna_monotone=0.
+        subsegments = [
+            _sub("pas1", [3.0] * 20),
+            _sub(".", [6.0] * 20),
+        ]
+        result = evaluate_all_pas_usage_patterns(subsegments, "seg1")
+        assert result is not None
+        assert result["pas_usage"]["pas1"] == pytest.approx(0.0)
+        assert result["rna_monotone"] == 0
+
+    def test_single_pas_drop_equals_pas_minus_trailing(self):
+        # rna_drop_cov must equal PAS_mean - trailing_mean, not PAS_mean.
+        subsegments = [
+            _sub("pas1", [10.0] * 20),
+            _sub(".", [4.0] * 20),
+        ]
+        result = evaluate_all_pas_usage_patterns(subsegments, "seg1")
+        assert result is not None
+        assert result["rna_drop_cov"][0] == pytest.approx(6.0)  # 10 - 4
 
     def test_too_many_pas_returns_none(self):
         # 11 PAS with max_pas_count=10 → should return None
@@ -171,6 +212,43 @@ class TestEvaluateAllPasUsagePatterns:
         )
         if result is not None:
             assert set(result["unique_pas_ids"]) == {"pas1", "pas2"}
+
+
+# ---------------------------------------------------------------------------
+# PAS clustering (_assign_cluster_ids, cluster_distance)
+# ---------------------------------------------------------------------------
+
+
+class TestPasClustering:
+    def test_assign_cluster_ids_empty(self):
+        assert _assign_cluster_ids([], 250) == []
+
+    def test_assign_cluster_ids_breaks_on_distance_and_none(self):
+        # 100->150 merges; 150->600 is too far; None breaks on both sides.
+        centers = [100.0, 150.0, 600.0, None, 700.0]
+        assert _assign_cluster_ids(centers, 100) == [0, 0, 1, 2, 3]
+
+    def test_close_pas_clustered_with_invalid_inputs(self, caplog):
+        # pas1/pas2 centres are 100 bp apart -> one cluster; pas3 has a NaN
+        # start, so its centre is None and it forms its own cluster. NaN and
+        # non-numeric atlas_rpm values fall back to 0.
+        def sub(pas_id, cov, start, end, rpm):
+            s = _sub(pas_id, cov)
+            s.update(pas_start=start, pas_end=end, atlas_rpm=rpm)
+            return s
+
+        subsegments = [
+            sub("pas1", [100.0] * 20, 1000, 1010, float("nan")),
+            sub("pas2", [90.0] * 20, 1100, 1110, "bad"),
+            sub("pas3", [40.0] * 20, float("nan"), 2010, 5.0),
+            _sub(".", [5.0] * 20),
+        ]
+        with caplog.at_level("DEBUG", logger="paqr3.calculate_cov_metrics"):
+            evaluate_all_pas_usage_patterns(
+                subsegments, "seg1", debug=True, f_stat_threshold=5,
+                cluster_distance=250,
+            )
+        assert "Clustered 3 PAS → 2 clusters" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -324,3 +402,317 @@ class TestCalculateCoveragesRun:
             merged["mean_cov_2"].values,
             rtol=1e-5,
         )
+
+
+# ---------------------------------------------------------------------------
+# Debug=True code paths in evaluate_all_pas_usage_patterns
+# ---------------------------------------------------------------------------
+
+
+class TestDebugLogPaths:
+    def test_all_zero_debug(self):
+        subsegments = [_sub("pas1", [0.0, 0.0])]
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", debug=True
+        )
+        assert result is not None
+        assert result["pas_usage"]["pas1"] == 0.0
+
+    def test_single_pas_debug(self):
+        subsegments = [
+            _sub("pas1", [10.0, 10.0]),
+            _sub(".", [2.0, 2.0]),
+        ]
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", debug=True
+        )
+        assert result is not None
+        assert result["pas_usage"]["pas1"] == pytest.approx(1.0)
+
+    def test_too_many_pas_debug(self):
+        subsegments = [_sub(f"pas{i}", [float(i + 1)]) for i in range(12)]
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", debug=True, max_pas_count=10
+        )
+        assert result is None
+
+    def test_no_pas_debug(self):
+        subsegments = [_sub(".", [5.0, 5.0])]
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", debug=True
+        )
+        assert result is None
+
+    def test_dfs_pattern_debug(self):
+        subsegments = [
+            _sub("pas1", [100.0] * 20),
+            _sub("pas2", [50.0] * 20),
+            _sub(".", [10.0] * 20),
+        ]
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", debug=True, f_stat_threshold=10
+        )
+        assert result is not None
+
+    def test_no_combos_debug(self):
+        subsegments = [
+            _sub("pas1", [10.0, 10.0, 10.0, 10.0]),
+            _sub("pas2", [10.0, 10.0, 10.0, 10.0]),
+        ]
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", debug=True, f_stat_threshold=1e9
+        )
+        assert result is None
+
+    def test_union_group_means_debug(self):
+        subsegments = [
+            _sub("pas1", [100.0] * 20),
+            _sub(".", [10.0] * 20),
+        ]
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", debug=True, f_stat_threshold=10
+        )
+        assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# DFS edge cases: tail monotonicity violation and single-group skip
+# ---------------------------------------------------------------------------
+
+
+class TestDfsEdgeCases:
+    def test_tail_monotonicity_violation(self):
+        # trailing has higher coverage than the last PAS → most patterns pruned
+        subsegments = [
+            _sub("pas1", [50.0] * 10),
+            _sub("pas2", [30.0] * 10),
+            _sub(".", [100.0] * 10),
+        ]
+        # With f_stat_threshold=0 some patterns still pass (cuts before tail)
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", f_stat_threshold=0
+        )
+        # May or may not be None; just check it doesn't crash.
+        assert result is None or isinstance(result, dict)
+
+    def test_single_group_pattern_skipped(self):
+        # 2 PAS, no trailing subsegment → pattern (0,1) creates 1 group → skipped
+        # pattern (1,1) creates 2 groups and should be evaluated
+        subsegments = [
+            _sub("pas1", [100.0] * 10),
+            _sub("pas2", [50.0] * 10),
+        ]
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", f_stat_threshold=0
+        )
+        # (0,1) single group is skipped (line 215). (1,1) has 2 groups, may pass.
+        assert result is None or isinstance(result, dict)
+
+
+# ---------------------------------------------------------------------------
+# Union pattern bit=0 (lines 295, 329)
+# ---------------------------------------------------------------------------
+
+
+class TestUnionPatternBitZero:
+    def test_union_pattern_has_zero_bit(self):
+        # pas1(low)→pas2(high)→pas3(mid)→trailing(low)
+        # Cut at pas1 (mean=10) → next group mean=80 → violates monotonicity
+        # Only patterns starting with bit=0 at pas1 can be monotone
+        # → union_pattern[0]=0 → lines 295 and 329 executed
+        subsegments = [
+            _sub("pas1", [10.0] * 20),
+            _sub("pas2", [80.0] * 20),
+            _sub("pas3", [40.0] * 20),
+            _sub(".", [5.0] * 20),
+        ]
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", f_stat_threshold=0
+        )
+        if result is not None:
+            assert result["pas_usage"]["pas1"] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# Greedy monotone union
+# ---------------------------------------------------------------------------
+
+
+class TestGreedyMonotoneUnion:
+    def test_non_monotone_math_union_resolved_by_greedy(self):
+        # Coverage 80 → 10 → 60 → 5 creates a valley pattern.
+        # The mathematical union [1,1,1] is non-monotone (10→60 inversion).
+        # The greedy loop accepts [1,0,1] (clusters 0 and 2 only, skipping
+        # cluster 1 whose inclusion would create the inversion), giving
+        # monotone group means 80 → 35 → 5.
+        subsegments = [
+            _sub("pas1", [80.0] * 50),
+            _sub("pas2", [10.0] * 50),
+            _sub("pas3", [60.0] * 50),
+            _sub(".", [5.0] * 50),
+        ]
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", f_stat_threshold=0
+        )
+        assert result is not None
+        assert result["rna_monotone"] == 1
+        assert result["debug_info"]["math_union_pattern"] == [1, 1, 1]
+        assert result["debug_info"]["math_union_monotone"] == 0
+        assert result["debug_info"]["selected_pattern"] == [1, 0, 1]
+
+    def test_non_monotone_math_union_greedy_debug_path(self):
+        # Same scenario as above with debug=True to cover the debug log
+        # branch that fires when math_union_monotone differs from selected.
+        subsegments = [
+            _sub("pas1", [80.0] * 50),
+            _sub("pas2", [10.0] * 50),
+            _sub("pas3", [60.0] * 50),
+            _sub(".", [5.0] * 50),
+        ]
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", f_stat_threshold=0, debug=True
+        )
+        assert result is not None
+        assert result["rna_monotone"] == 1
+
+    def test_monotone_math_union_unchanged_by_greedy(self):
+        # When the mathematical union is already monotone, the greedy loop
+        # accumulates all bits and selected_pattern == math_union_pattern.
+        subsegments = [
+            _sub("pas1", [100.0] * 50),
+            _sub("pas2", [60.0] * 50),
+            _sub(".", [10.0] * 50),
+        ]
+        result = evaluate_all_pas_usage_patterns(
+            subsegments, "seg1", f_stat_threshold=0
+        )
+        assert result is not None
+        assert result["rna_monotone"] == 1
+        assert result["debug_info"]["math_union_monotone"] == 1
+        assert (
+            result["debug_info"]["selected_pattern"]
+            == result["debug_info"]["math_union_pattern"]
+        )
+
+
+# ---------------------------------------------------------------------------
+# process_segment
+# ---------------------------------------------------------------------------
+
+
+class TestProcessSegment:
+    def test_returns_triple(self):
+        subs = [
+            {"gene_id": "g1", "segment_id": "s1",
+             "subsegment_id": "s1:001", "pas_id": "cs1",
+             "mean_cov": 50.0, "sum_squared_values": 0.0,
+             "coverage": np.array([50.0] * 20)},
+            {"gene_id": "g1", "segment_id": "s1",
+             "subsegment_id": "s1:002", "pas_id": ".",
+             "mean_cov": 5.0, "sum_squared_values": 0.0,
+             "coverage": np.array([5.0] * 20)},
+        ]
+        seg_id, out_subs, result = process_segment(
+            ("s1", subs), max_pas_count=10, f_stat_threshold=0
+        )
+        assert seg_id == "s1"
+        assert out_subs is subs
+        assert result is not None
+
+    def test_none_when_no_pas(self):
+        subs = [
+            {"gene_id": "g1", "segment_id": "s1",
+             "subsegment_id": "s1:001", "pas_id": ".",
+             "mean_cov": 5.0, "sum_squared_values": 0.0,
+             "coverage": np.array([5.0] * 10)},
+        ]
+        _, _, result = process_segment(("s1", subs))
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _read_coverage_batch RuntimeError fallback (lines 464-465)
+# ---------------------------------------------------------------------------
+
+
+class TestReadCoverageBatch:
+    def test_runtime_error_yields_empty_array(self):
+        Row = collections.namedtuple(
+            "Row",
+            ["gene_id", "segment_id", "subsegment_id",
+             "chrom", "start", "end", "strand", "pas_id"],
+        )
+        row = Row("g1", "seg1", "s1:001", "chr1", 100, 200, "+", ".")
+
+        mock_bw = MagicMock()
+        mock_bw.values.side_effect = RuntimeError("chrom not in bigwig")
+        mock_bw.close = MagicMock()
+
+        with patch(
+            "paqr3.calculate_cov_metrics.pyBigWig.open",
+            return_value=mock_bw,
+        ):
+            rows = _read_coverage_batch([row], "fake.bw", "fake.bw")
+
+        assert len(rows) == 1
+        assert rows[0]["mean_cov"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# evaluate_pas_usage_models: None-result skip and debug JSON (lines 613, 660, 698-699)
+# ---------------------------------------------------------------------------
+
+
+def _dot_only_df() -> pd.DataFrame:
+    return pd.DataFrame([{
+        "gene_id": "g1",
+        "segment_id": "seg1",
+        "subsegment_id": "seg1:001",
+        "pas_id": ".",
+        "mean_cov": 10.0,
+        "sum_squared_values": 0.0,
+        "coverage": np.array([10.0] * 5),
+    }])
+
+
+def _single_pas_df() -> pd.DataFrame:
+    return pd.DataFrame([
+        {"gene_id": "g1", "segment_id": "seg1",
+         "subsegment_id": "seg1:001", "pas_id": "cs1",
+         "mean_cov": 80.0, "sum_squared_values": 0.0,
+         "coverage": np.array([80.0] * 20)},
+        {"gene_id": "g1", "segment_id": "seg1",
+         "subsegment_id": "seg1:002", "pas_id": ".",
+         "mean_cov": 10.0, "sum_squared_values": 0.0,
+         "coverage": np.array([10.0] * 20)},
+    ])
+
+
+class TestEvaluatePasUsageModels:
+    def test_none_result_skipped_sequential(self):
+        cc = CalculateCoverages("", "")
+        usage_df = cc.evaluate_pas_usage_models(
+            _dot_only_df(), n_procs=1
+        )
+        assert usage_df.empty
+
+    def test_none_result_skipped_parallel(self):
+        cc = CalculateCoverages("", "")
+        usage_df = cc.evaluate_pas_usage_models(
+            _dot_only_df(), n_procs=2
+        )
+        assert usage_df.empty
+
+    def test_debug_json_written(self, tmp_path):
+        cc = CalculateCoverages("", "")
+        debug_path = str(tmp_path / "debug.json")
+        cc.evaluate_pas_usage_models(
+            _single_pas_df(),
+            output_tsv_debug=debug_path,
+            n_procs=1,
+            f_stat_threshold=0,
+        )
+        assert os.path.exists(debug_path)
+        with open(debug_path) as fh:
+            data = json.load(fh)
+        assert isinstance(data, list)

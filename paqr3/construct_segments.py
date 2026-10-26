@@ -18,8 +18,12 @@ logger = logging.getLogger(__name__)
 _PAS_RPM_COL: int = 4
 
 # Maps segment_origin values to single-letter type prefixes used in IDs.
-# "EX" → regular exon, "IN" → intron, "TE" → terminal exon.
-_ORIGIN_TO_PREFIX: dict[str, str] = {"EX": "E", "IN": "I", "TE": "T"}
+# "EX" -> regular exon, "IN" -> intron, "TE" -> the gene's single terminal-
+# exon anchor, "AL" -> alternative (exonic in some transcripts, intronic
+# in others, excluding the TE anchor itself).
+_ORIGIN_TO_PREFIX: dict[str, str] = {
+    "EX": "E", "IN": "I", "TE": "T", "AL": "A",
+}
 
 # Columns excluded when building GTF attribute dicts.
 _GENE_SKIP_COLS: frozenset[str] = frozenset(
@@ -70,11 +74,13 @@ class ConstructSegments:
     # ------------------------------------------------------------------
 
     def _gene_extent(self, gene: Gene) -> tuple[int, int]:
-        """Return (min_start, max_end) across all regions of gene."""
+        """Return (min_start, max_end) across all regions of gene, or (0, 0)."""
         starts = [
             r.start for t in gene.transcripts.values() for r in t.regions
         ]
         ends = [r.end for t in gene.transcripts.values() for r in t.regions]
+        if not starts:
+            return (0, 0)
         return min(starts), max(ends)
 
     def _gene_chrom(self, gene: Gene) -> str | None:
@@ -215,12 +221,17 @@ class ConstructSegments:
             if gene_strand == "+":
                 potential_end = gene_end + self.downstream_exon_extension
                 next_gene_start = potential_end
-                # bisect_right finds the first entry with start >
-                # gene_end — i.e. the nearest downstream gene.
-                idx = bisect.bisect_right(starts, gene_end)
+                # bisect_left finds the first entry with start >= gene_end,
+                # catching book-ended neighbours (start == gene_end) as well
+                # as strictly downstream ones.
+                idx = bisect.bisect_left(starts, gene_end)
                 if idx < len(entries):
-                    next_gene_start = min(potential_end, entries[idx][0] - 1)
-                gene_end = min(potential_end, next_gene_start)
+                    # Half-open coords: ending at the next start book-ends
+                    # it without overlap (as prev_end does on "-").
+                    next_gene_start = min(potential_end, entries[idx][0])
+                # max(gene_end, ...) prevents shrinking a gene that already
+                # reaches or shares the boundary with the next gene.
+                gene_end = max(gene_end, min(potential_end, next_gene_start))
 
             elif gene_strand == "-":
                 potential_start = gene_start - self.downstream_exon_extension
@@ -231,8 +242,9 @@ class ConstructSegments:
                 while idx >= 0:
                     _, prev_gene = entries[idx]
                     _, prev_end = self._gene_extent(prev_gene)
-                    if prev_end < gene_start:
-                        previous_gene_end = max(potential_start, prev_end + 1)
+                    # <= catches book-ended upstream genes (prev_end == gene_start).
+                    if prev_end <= gene_start:
+                        previous_gene_end = max(potential_start, prev_end)
                         break
                     idx -= 1
                 gene_start = max(potential_start, previous_gene_end)
@@ -267,6 +279,13 @@ class ConstructSegments:
                             )
                         ),
                     )
+                    # Remember the annotated 3' end: capping at a
+                    # neighbouring gene can make extended ends coincide.
+                    terminal_exon.attributes["unextended_3p_end"] = (
+                        terminal_exon.end
+                        if terminal_exon.strand == "+"
+                        else terminal_exon.start
+                    )
                     gene_end: int = gene.attributes["end"]
                     gene_start_attr: int = gene.attributes["start"]
                     if terminal_exon.strand == "+":
@@ -285,6 +304,13 @@ class ConstructSegments:
                     terminal_exon = min(
                         transcript.regions,
                         key=lambda r: r.start,
+                    )
+                    # Remember the annotated 3' end: capping at a
+                    # neighbouring gene can make extended ends coincide.
+                    terminal_exon.attributes["unextended_3p_end"] = (
+                        terminal_exon.end
+                        if terminal_exon.strand == "+"
+                        else terminal_exon.start
                     )
                     gene_end = gene.attributes["end"]
                     gene_start_attr = gene.attributes["start"]
@@ -354,11 +380,27 @@ class ConstructSegments:
     def construct_segments(self) -> None:
         """Split each gene into non-overlapping genomic segments.
 
-        Boundaries inside terminal exons (except at the gene boundary)
-        are suppressed to keep the terminal-exon region intact.
-        Each segment gets a segment_number (1-based) and segment_origin
-        ("IN", "TE", or "EX") in its attributes. Results stored in
-        gene.segments.
+        Each gene gets exactly one terminal-exon ("TE") segment, the TE
+        island: from the 5' edge of the anchor to the gene's 3' end.
+        The anchor is the union of all terminal exons whose annotated
+        (pre-extension) 3' end is exactly the gene's most 3' one;
+        terminal exons ending anywhere upstream of it do not widen the
+        island. Every boundary strictly inside the island is
+        suppressed, including other transcripts' introns, so it is
+        always one segment.
+
+        Terminal-exon 3' ends never create a boundary (apart from the
+        gene end itself), so a PAS at the 3' end of an upstream-ending
+        transcript sits inside a segment together with the coverage
+        drop after it, rather than on a segment edge.
+
+        Every other segment is classified by plain overlap against all
+        transcripts' real exons/introns: exonic for every transcript
+        touching it -> "EX"; intronic for every transcript touching it
+        -> "IN"; exonic for some and intronic for others -> "AL"
+        (alternative). Each segment gets a segment_number (1-based) and
+        segment_origin ("TE", "EX", "IN", or "AL") in its attributes.
+        Results stored in gene.segments.
         """
         for gene in self.genes.values():
             strand = self._gene_strand(gene)
@@ -373,43 +415,65 @@ class ConstructSegments:
                     all_regions.append((region.start, region.end, region))
 
             all_regions.sort(key=lambda x: (x[0], x[1]))
-            segment_boundaries: set[int] = set()
-            for start, end, _ in all_regions:
-                segment_boundaries.add(start)
-                segment_boundaries.add(end)
 
-            # Collect terminal-exon boundaries to suppress mid-TE
-            # splits while keeping the gene-boundary split.
-            terminal_exons_ends: set[int] = set()
-            terminal_exons_starts: set[int] = set()
+            # Pre-collect region lists: all exons/introns (for overlap
+            # classification) and terminal exons (to find the anchor).
+            gene_introns: list[Region] = []
+            gene_exons: list[Region] = []
+            gene_terminal_exons: list[Region] = []
             for transcript in gene.transcripts.values():
-                for region in transcript.regions:
-                    if region.region_type == "exon":
-                        is_terminal = bool(
-                            region.attributes.get("is_terminal_exon", False)
-                        )
-                        if is_terminal:
-                            if region.strand == "+":
-                                terminal_exons_ends.add(region.end)
-                            else:
-                                terminal_exons_starts.add(region.start)
+                for r in transcript.regions:
+                    if r.region_type == "intron":
+                        gene_introns.append(r)
+                    elif r.region_type == "exon":
+                        gene_exons.append(r)
+                        if r.attributes.get("is_terminal_exon", False):
+                            gene_terminal_exons.append(r)
+
+            # Every region edge is a boundary except terminal-exon 3'
+            # ends; the gene's own 3' end is added back explicitly.
+            segment_boundaries: set[int] = {gene_start, gene_end}
+            for start, end, region in all_regions:
+                is_te = region.attributes.get("is_terminal_exon", False)
+                if not (is_te and strand == "-"):
+                    segment_boundaries.add(start)
+                if not (is_te and strand == "+"):
+                    segment_boundaries.add(end)
+
+            # Anchor: terminal exons whose annotated (pre-extension) 3' end
+            # is exactly the gene's most 3' one; their union, from its 5'
+            # edge to the gene end, is the TE island.
+            def _three_prime(r: Region, strand: str | None = strand) -> int:
+                default = r.end if strand == "+" else r.start
+                return int(r.attributes.get("unextended_3p_end", default))
+
+            te_island: tuple[int, int] | None = None
+            if gene_terminal_exons:
+                if strand == "+":
+                    best = max(_three_prime(r) for r in gene_terminal_exons)
+                    te_start = min(
+                        r.start
+                        for r in gene_terminal_exons
+                        if _three_prime(r) == best
+                    )
+                    te_island = (te_start, gene_end)
+                else:
+                    best = min(_three_prime(r) for r in gene_terminal_exons)
+                    te_end = max(
+                        r.end
+                        for r in gene_terminal_exons
+                        if _three_prime(r) == best
+                    )
+                    te_island = (gene_start, te_end)
 
             valid_segment_boundaries: set[int] = set()
             for boundary in segment_boundaries:
-                if strand == "+":
-                    if (
-                        boundary in terminal_exons_ends
-                        and boundary != gene_end
-                    ):
-                        continue
-                    valid_segment_boundaries.add(boundary)
-                elif strand == "-":
-                    if (
-                        boundary in terminal_exons_starts
-                        and boundary != gene_start
-                    ):
-                        continue
-                    valid_segment_boundaries.add(boundary)
+                if (
+                    te_island is not None
+                    and te_island[0] < boundary < te_island[1]
+                ):
+                    continue
+                valid_segment_boundaries.add(boundary)
 
             sorted_boundaries = sorted(valid_segment_boundaries)
             segments: list[Region] = []
@@ -434,19 +498,6 @@ class ConstructSegments:
             if strand == "-":
                 segments.reverse()
 
-            # Pre-collect region lists for origin labelling.
-            gene_introns: list[Region] = []
-            gene_exons: list[Region] = []
-            gene_terminal_exons: list[Region] = []
-            for transcript in gene.transcripts.values():
-                for r in transcript.regions:
-                    if r.region_type == "intron":
-                        gene_introns.append(r)
-                    elif r.region_type == "exon":
-                        gene_exons.append(r)
-                        if r.attributes.get("is_terminal_exon", False):
-                            gene_terminal_exons.append(r)
-
             def _overlaps(
                 a_start: int,
                 a_end: int,
@@ -459,21 +510,24 @@ class ConstructSegments:
                 segment.attributes["segment_number"] = i + 1
                 seg_s, seg_e = segment.start, segment.end
 
-                is_intron = any(
+                if te_island is not None and (seg_s, seg_e) == te_island:
+                    segment.attributes["segment_origin"] = "TE"
+                    continue
+
+                touches_exon = any(
+                    _overlaps(seg_s, seg_e, r.start, r.end)
+                    for r in gene_exons
+                )
+                touches_intron = any(
                     _overlaps(seg_s, seg_e, r.start, r.end)
                     for r in gene_introns
                 )
-                if is_intron:
+                if touches_exon and touches_intron:
+                    segment.attributes["segment_origin"] = "AL"
+                elif touches_intron:
                     segment.attributes["segment_origin"] = "IN"
                 else:
-                    is_te = any(
-                        _overlaps(seg_s, seg_e, r.start, r.end)
-                        for r in gene_terminal_exons
-                    )
-                    if is_te:
-                        segment.attributes["segment_origin"] = "TE"
-                    else:
-                        segment.attributes["segment_origin"] = "EX"
+                    segment.attributes["segment_origin"] = "EX"
 
             gene.segments = segments
 
@@ -847,7 +901,7 @@ class ConstructSegments:
                 debug_rows.append({
                     "chrom": g_chrom, "start": g_start,
                     "end": g_end, "id": gene.gene_id,
-                    "type": "gene", "strand": g_strand,
+                    "type": "gene", "score": ".", "strand": g_strand,
                 })
 
             for segment in gene.segments:
@@ -864,6 +918,7 @@ class ConstructSegments:
                         "end": segment.end,
                         "id": seg_id,
                         "type": "segment",
+                        "score": ".",
                         "strand": segment.strand,
                     })
 
@@ -908,6 +963,7 @@ class ConstructSegments:
                             "end": sub.end,
                             "id": sub_id,
                             "type": "subsegment",
+                            "score": ".",
                             "strand": sub.strand,
                         })
                         if rep_cs != "." and rep_cs not in seen_pas:
@@ -921,6 +977,7 @@ class ConstructSegments:
                                     "end": pe,
                                     "id": rep_cs,
                                     "type": "pas",
+                                    "score": ".",
                                     "strand": pstr,
                                 })
 
@@ -942,7 +999,9 @@ class ConstructSegments:
         if out_debug_prefix and debug_rows:
             debug_df = pd.DataFrame(
                 debug_rows,
-                columns=["chrom", "start", "end", "id", "type", "strand"],
+                columns=[
+                    "chrom", "start", "end", "id", "type", "score", "strand",
+                ],
             )
             for cat, suffix in (
                 ("gene", "genes"),

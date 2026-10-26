@@ -10,7 +10,6 @@ from functools import partial
 import numpy as np
 import pandas as pd  # type: ignore
 import pyBigWig  # type: ignore
-import pysam  # type: ignore
 from pybedtools import BedTool  # type: ignore
 from scipy.stats import f  # type: ignore
 
@@ -41,27 +40,62 @@ def json_serial(obj):
     raise TypeError(f"Type {type(obj)} not serializable")
 
 
+def _assign_cluster_ids(
+    pas_centers: list,
+    cluster_distance: float,
+) -> list[int]:
+    """Assign a cluster ID to each PAS based on centre-to-centre distance.
+
+    Consecutive PAS whose centres are within cluster_distance bp of
+    each other receive the same cluster ID.  IDs are 0-based integers
+    that increase whenever a gap exceeds the threshold.
+
+    Args:
+        pas_centers: Centre coordinates (float or None) for each PAS
+            in gene order.  None entries force a cluster break.
+        cluster_distance: Maximum centre-to-centre distance to merge.
+
+    Returns:
+        List of integer cluster IDs, same length as pas_centers.
+    """
+    if not pas_centers:
+        return []
+    ids = [0]
+    current = 0
+    for k in range(1, len(pas_centers)):
+        p1, p2 = pas_centers[k - 1], pas_centers[k]
+        if p1 is None or p2 is None or abs(p2 - p1) > cluster_distance:
+            current += 1
+        ids.append(current)
+    return ids
+
+
 def evaluate_all_pas_usage_patterns(
     subsegments,
     segment_id,
     debug=False,
     max_pas_count=10,
     f_stat_threshold=100,
+    cluster_distance=0,
 ):
     """Find PAS usage patterns satisfying monotonicity and F-stat criteria.
 
-    Uses a pruned DFS over binary assignment patterns, keeping those
-    where coverage is non-increasing across groups and whose F-statistic
-    meets the threshold. A union of all passing patterns determines
-    final per-PAS usage fractions.
+    Uses a pruned DFS over binary assignment patterns on PAS clusters,
+    keeping those where coverage is non-increasing across groups and
+    whose F-statistic meets the threshold.  Nearby PAS within
+    cluster_distance are merged into a single unit for the ANOVA; their
+    individual drops are then distributed proportionally by atlas_rpm.
 
     Args:
         subsegments: List of sub-segment dicts with coverage (numpy
-            array) and pas_id ("." for non-PAS) keys.
+            array), pas_id ("." for non-PAS), and optionally
+            pas_start, pas_end, atlas_rpm keys.
         segment_id: Used in debug log messages.
         debug: Emit verbose per-pattern log messages.
-        max_pas_count: Skip segments with more unique PAS than this.
+        max_pas_count: Skip segments with more clusters than this.
         f_stat_threshold: Minimum F-statistic to retain a pattern.
+        cluster_distance: Maximum centre-to-centre distance (bp) to
+            merge consecutive PAS into one cluster.  0 = no clustering.
 
     Returns:
         Dict with keys pas_usage, f_stat, p_value, rna_drop_cov,
@@ -97,22 +131,26 @@ def evaluate_all_pas_usage_patterns(
             "unique_pas_ids": unique_pas_ids,
         }
 
-    # 2) Single-PAS segment: force usage = 1 if coverage > 0
+    # 2) Single-PAS segment: assign usage = 1 only when coverage drops
+    # after the PAS.  A flat or rising trailing profile means the PAS is
+    # not a genuine usage signal.  Drop = PAS_mean - trailing_mean
+    # (consistent with the multi-PAS boundary drop formula).
     if len(unique_pas_ids) == 1:
         pid = unique_pas_ids[0]
         idx = next(i for i, x in enumerate(pas_ids) if x == pid)
         mu = computed_means[idx]
-        if mu > 0:
-            usage, drop, sum_drop, mono = 1.0, mu, mu, 1
+        trailing_covs = [computed_means[j] for j in range(idx + 1, len(pas_ids))]
+        trailing_mean = float(np.mean(trailing_covs)) if trailing_covs else 0.0
+        if mu > trailing_mean:
+            drop = mu - trailing_mean
+            usage, sum_drop, mono = 1.0, drop, 1
         else:
             usage, drop, sum_drop, mono = 0.0, 0.0, 0.0, 0
         if debug:
             logger.debug(
-                "DEBUG: [%s] Single PAS '%s', mean_cov=%.3f " "→ usage=%.3f",
-                segment_id,
-                pid,
-                mu,
-                usage,
+                "DEBUG: [%s] Single PAS '%s', mean_cov=%.3f, "
+                "trailing_mean=%.3f → usage=%.3f",
+                segment_id, pid, mu, trailing_mean, usage,
             )
         return {
             "pas_usage": {pid: usage},
@@ -126,20 +164,7 @@ def evaluate_all_pas_usage_patterns(
             "unique_pas_ids": unique_pas_ids,
         }
 
-    # 3) Too many PAS? skip
-    if len(unique_pas_ids) > max_pas_count:
-        if debug:
-            logger.debug(
-                "DEBUG: [%s] Too many PAS (%d) in this segment; "
-                "only segments with %d or fewer PAS are evaluated. "
-                "Skipping.",
-                segment_id,
-                len(unique_pas_ids),
-                max_pas_count,
-            )
-        return None
-
-    # 4) No PAS at all? skip
+    # 3) No PAS at all? skip
     if not unique_pas_ids:
         if debug:
             logger.debug(
@@ -148,17 +173,36 @@ def evaluate_all_pas_usage_patterns(
             )
         return None
 
-    # 5) Evaluate every monotone pattern via pruned DFS.
-    #
-    # Build per-PAS "slices": slices[k] contains coverage indices from
-    # immediately after PAS k-1 up to and including PAS k.  tail holds
-    # any indices that follow the last PAS.  A group is a contiguous
-    # run of slices, so its concatenated array and mean can be memoised
-    # by frozenset of coverage indices — groups shared across different
-    # patterns are computed only once.
-    m = len(unique_pas_ids)
-    slices = []
-    current_slice = []
+    # Extract atlas_rpm and centre positions for each PAS (in PAS order).
+    atlas_rpms: list[float] = []
+    pas_centers: list = []
+    for s in subsegments:
+        if str(s["pas_id"]) == ".":
+            continue
+        ar = s.get("atlas_rpm", 0.0)
+        try:
+            ar = float(ar)
+            if np.isnan(ar):
+                ar = 0.0
+        except (TypeError, ValueError):
+            ar = 0.0
+        atlas_rpms.append(ar)
+
+        ps = s.get("pas_start")
+        pe = s.get("pas_end")
+        try:
+            center = (float(ps) + float(pe)) / 2.0
+            if np.isnan(center):
+                center = None
+        except (TypeError, ValueError):
+            center = None
+        pas_centers.append(center)
+
+    # Build per-PAS slices: slices[k] = coverage indices from after
+    # PAS k-1 up to and including PAS k.  tail = indices after last PAS.
+    m_orig = len(unique_pas_ids)
+    slices: list[list[int]] = []
+    current_slice: list[int] = []
     for cov_idx, pid in enumerate(pas_ids):
         current_slice.append(cov_idx)
         if pid != ".":
@@ -166,9 +210,42 @@ def evaluate_all_pas_usage_patterns(
             current_slice = []
     tail = current_slice
 
-    # Cache: frozenset(cov_indices) → concatenated coverage array.
-    # Single-element groups bypass the cache to avoid dict overhead.
-    _concat_cache = {}
+    # Cluster consecutive PAS whose centres are ≤ cluster_distance apart,
+    # then merge their slices so the DFS operates on clusters.
+    if cluster_distance > 0 and m_orig > 1:
+        cluster_id_per_pas = _assign_cluster_ids(pas_centers, cluster_distance)
+        n_clusters = cluster_id_per_pas[-1] + 1
+        virtual_slices: list[list[int]] = [[] for _ in range(n_clusters)]
+        for i, cid in enumerate(cluster_id_per_pas):
+            virtual_slices[cid].extend(slices[i])
+        slices = virtual_slices
+        if debug and n_clusters < m_orig:
+            logger.debug(
+                "DEBUG: [%s] Clustered %d PAS → %d clusters "
+                "(cluster_distance=%d bp)",
+                segment_id, m_orig, n_clusters, cluster_distance,
+            )
+    else:
+        cluster_id_per_pas = list(range(m_orig))
+        n_clusters = m_orig
+
+    m = n_clusters  # DFS dimensionality = number of clusters
+
+    # 4) Too many clusters? skip
+    if m > max_pas_count:
+        if debug:
+            logger.debug(
+                "DEBUG: [%s] Too many clusters (%d); "
+                "only segments with %d or fewer are evaluated. Skipping.",
+                segment_id, m, max_pas_count,
+            )
+        return None
+
+    # 5) Evaluate every monotone cluster pattern via pruned DFS.
+    #
+    # slices[k] now holds concatenated coverage indices for all PAS in
+    # cluster k.  The DFS explores cut/no-cut at each cluster boundary.
+    _concat_cache: dict = {}
 
     def _group_array(indices):
         if len(indices) == 1:
@@ -187,20 +264,19 @@ def evaluate_all_pas_usage_patterns(
     combos_info = []
 
     def _dfs(k, g_start, prev_mean, groups, bits):
-        """DFS over binary cut/no-cut decisions at each PAS position.
+        """DFS over binary cut/no-cut decisions at each cluster position.
 
         Prunes any branch where the newly closed group's mean exceeds
         the previous group's mean, cutting off non-monotone sub-trees
         before their F-statistics are computed.
 
         Args:
-            k: Index of the PAS slice currently being considered.
-            g_start: Slice index at which the current open group
-                began.
-            prev_mean: Mean of the last closed group; ``float("inf")``
-                at the root so any first group is accepted.
-            groups: Closed groups accumulated so far (mutated in
-                place; restored on backtrack).
+            k: Index of the cluster slice currently being considered.
+            g_start: Slice index at which the current open group began.
+            prev_mean: Mean of the last closed group; float("inf") at
+                the root so any first group is accepted.
+            groups: Closed groups accumulated so far (mutated in place;
+                restored on backtrack).
             bits: Pattern bits accumulated so far (mutated in place;
                 restored on backtrack).
         """
@@ -243,26 +319,23 @@ def evaluate_all_pas_usage_patterns(
             if debug:
                 logger.debug(
                     "DEBUG: Segment %s pattern %s: f_stat=%.3f",
-                    segment_id,
-                    tuple(bits),
-                    f_stat_val,
+                    segment_id, tuple(bits), f_stat_val,
                 )
             if f_stat_val >= f_stat_threshold:
                 combos_info.append((tuple(bits), f_stat_val, p_val))
             return
 
-        # Option A: cut at PAS k (bit = 1).
-        # Closes the current group as the union of slices[g_start..k].
+        # Option A: cut at cluster k (bit = 1).
         cut_indices = [i for s in slices[g_start : k + 1] for i in s]
         cut_mean = _group_mean(cut_indices)
-        if cut_mean <= prev_mean:  # monotone prefix — explore
+        if cut_mean <= prev_mean:
             groups.append(cut_indices)
             bits.append(1)
             _dfs(k + 1, k + 1, cut_mean, groups, bits)
             groups.pop()
             bits.pop()
 
-        # Option B: no cut at PAS k (bit = 0).
+        # Option B: no cut at cluster k (bit = 0).
         bits.append(0)
         _dfs(k + 1, g_start, prev_mean, groups, bits)
         bits.pop()
@@ -279,56 +352,116 @@ def evaluate_all_pas_usage_patterns(
             )
         return None
 
-    # 7) Build the union pattern and compute final drops & usage
+    # 7) Compute the mathematical union (OR of all passing patterns) for
+    # debug reporting, then derive the active pattern via greedy monotone
+    # accumulation.
     union_pattern = [
         int(any(pat[i] for pat, *_ in combos_info)) for i in range(m)
     ]
-    groups, current, idx = [], [], 0
-    for cov_idx, pid in enumerate(pas_ids):
-        if pid == ".":
-            current.append(cov_idx)
-        else:
-            if union_pattern[idx] == 1:
-                current.append(cov_idx)
-                groups.append(current)
-                current = []
-            else:
-                current.append(cov_idx)
-            idx += 1
-    if current:
-        groups.append(current)
 
-    # Reuse the memoised _group_mean for the union groups.
-    group_means = [_group_mean(g) if g else 0.0 for g in groups]
+    def _reconstruct(
+        pattern: list[int],
+    ) -> tuple[list[list[int]], list[float], list[float], int]:
+        """Reconstruct groups from a cluster-cut pattern, compute drops.
+
+        Args:
+            pattern: Per-cluster cut flags (1 = cut after this cluster).
+
+        Returns:
+            Tuple of (groups, group_means, cluster_drops, is_monotone).
+        """
+        grps: list[list[int]] = []
+        cur: list[int] = []
+        pi = 0
+        for ci, pid in enumerate(pas_ids):
+            if pid == ".":
+                cur.append(ci)
+            else:
+                cid = cluster_id_per_pas[pi]
+                is_last = (
+                    pi == m_orig - 1
+                    or cluster_id_per_pas[pi + 1] != cid
+                )
+                cur.append(ci)
+                if is_last and pattern[cid] == 1:
+                    grps.append(cur)
+                    cur = []
+                pi += 1
+        if cur:
+            grps.append(cur)
+        g_means = [_group_mean(g) if g else 0.0 for g in grps]
+        if len(g_means) >= 2:
+            c_drops = [
+                g_means[i] - g_means[i + 1]
+                for i in range(len(g_means) - 1)
+            ]
+        else:
+            c_drops = [g_means[0]]  # pragma: no cover
+        c_drops.append(0.0)
+        c_sum = sum(c_drops)
+        mono = int(c_sum > 0 and all(d >= 0 for d in c_drops[:-1]))
+        return grps, g_means, c_drops, mono
+
+    # Greedy monotone union: process patterns in decreasing F-stat order.
+    # Accumulate each pattern's bits into the active union only when the
+    # result remains monotone.  A skipped pattern does not end the loop —
+    # later patterns with different bits may still be compatible.
+    # Because each individual pattern is monotone (DFS guarantee), the
+    # first (highest-F) pattern is always accepted.
+    active_pattern: list[int] = [0] * m
+    for pat, _fval, _pval in sorted(
+        combos_info, key=lambda x: x[1], reverse=True
+    ):
+        candidate = [max(active_pattern[i], pat[i]) for i in range(m)]
+        if candidate == active_pattern:
+            continue  # no new bits to add
+        _, _, _, cand_mono = _reconstruct(candidate)
+        if cand_mono:
+            active_pattern = candidate
+
+    groups, group_means, cluster_drops, final_mono = _reconstruct(
+        active_pattern
+    )
+    _, _, _, orig_union_mono = _reconstruct(union_pattern)
+
     if debug:
         logger.debug(
-            "DEBUG: Segment %s union group means: %s",
-            segment_id,
-            group_means,
+            "DEBUG: Segment %s math_union_pattern: %s "
+            "(union_monotone=%d)",
+            segment_id, union_pattern, orig_union_mono,
+        )
+        logger.debug(
+            "DEBUG: Segment %s selected_pattern (greedy): %s",
+            segment_id, active_pattern,
+        )
+        logger.debug(
+            "DEBUG: Segment %s group_means: %s", segment_id, group_means,
         )
 
-    if len(group_means) >= 2:
-        union_drops = [
-            group_means[i] - group_means[i + 1]
-            for i in range(len(group_means) - 1)
-        ]
-    else:
-        union_drops = [group_means[0]]
-    union_drops.append(0.0)
-    sum_union_drops = sum(union_drops)
-
-    union_mono = int(
-        sum_union_drops > 0 and all(d >= 0 for d in union_drops[:-1])
-    )
-
-    drop_per_pas, drop_idx = [], 0
-    for flag in union_pattern:
+    # Map each cut-point cluster to its drop value.
+    drop_per_cluster: dict[int, float] = {}
+    drop_idx = 0
+    for cid, flag in enumerate(active_pattern):
         if flag:
-            drop_per_pas.append(union_drops[drop_idx])
+            drop_per_cluster[cid] = cluster_drops[drop_idx]
             drop_idx += 1
         else:
-            drop_per_pas.append(0.0)
+            drop_per_cluster[cid] = 0.0
 
+    # Distribute each cluster's drop to its individual PAS proportionally
+    # by atlas_rpm.  Fall back to equal shares when all atlas_rpm = 0.
+    drop_per_pas: list[float] = []
+    for i, cid in enumerate(cluster_id_per_pas):
+        members = [j for j, c in enumerate(cluster_id_per_pas) if c == cid]
+        total_atlas = sum(atlas_rpms[j] for j in members)
+        weight = (
+            atlas_rpms[i] / total_atlas
+            if total_atlas > 0
+            else 1.0 / len(members)
+        )
+        drop_per_pas.append(drop_per_cluster[cid] * weight)
+
+    sum_union_drops = sum(drop_per_pas)
     usage_per_pas = [
         (d / sum_union_drops if sum_union_drops > 0 else 0.0)
         for d in drop_per_pas
@@ -336,14 +469,13 @@ def evaluate_all_pas_usage_patterns(
     _, best_f, best_p = max(combos_info, key=lambda x: x[1])
 
     logger.debug(
-        "DEBUG: Segment %s union_pattern: %s", segment_id, union_pattern
-    )
-    logger.debug("DEBUG: Segment %s union_drops: %s", segment_id, union_drops)
-    logger.debug(
-        "DEBUG: Segment %s union_monotonic: %s", segment_id, union_mono
+        "DEBUG: Segment %s cluster_drops: %s", segment_id, cluster_drops,
     )
     logger.debug(
-        "DEBUG: Segment %s usage_per_pas: %s", segment_id, usage_per_pas
+        "DEBUG: Segment %s drop_per_pas: %s", segment_id, drop_per_pas,
+    )
+    logger.debug(
+        "DEBUG: Segment %s final_mono: %s", segment_id, final_mono,
     )
 
     return {
@@ -354,11 +486,20 @@ def evaluate_all_pas_usage_patterns(
         "p_value": best_p,
         "rna_drop_cov": drop_per_pas,
         "rna_sum_drop_cov": sum_union_drops,
-        "rna_monotone": union_mono,
-        "used_combos": [pat for pat, *_ in combos_info],
+        "rna_monotone": final_mono,
+        "used_combos": [
+            {"pattern": list(pat), "f_stat": f_val, "p_value": p_val}
+            for pat, f_val, p_val in combos_info
+        ],
         "debug_info": {
             "threshold": f_stat_threshold,
             "num_kept_combos": len(combos_info),
+            "n_original_pas": m_orig,
+            "n_clusters": n_clusters,
+            "cluster_assignments": cluster_id_per_pas,
+            "math_union_pattern": union_pattern,
+            "math_union_monotone": orig_union_mono,
+            "selected_pattern": active_pattern,
         },
         "unique_pas_ids": unique_pas_ids,
     }
@@ -407,6 +548,7 @@ def process_segment(
     debug=False,
     max_pas_count=10,
     f_stat_threshold=100,
+    cluster_distance=0,
 ):
     """Evaluate PAS usage patterns for one segment.
 
@@ -418,6 +560,7 @@ def process_segment(
         debug: Forwarded to evaluate_all_pas_usage_patterns.
         max_pas_count: Forwarded to evaluate_all_pas_usage_patterns.
         f_stat_threshold: Forwarded to evaluate_all_pas_usage_patterns.
+        cluster_distance: Forwarded to evaluate_all_pas_usage_patterns.
 
     Returns:
         (segment_id, subsegments, result) triple.
@@ -429,6 +572,7 @@ def process_segment(
         debug=debug,
         max_pas_count=max_pas_count,
         f_stat_threshold=f_stat_threshold,
+        cluster_distance=cluster_distance,
     )
     return segment_id, subsegments, result
 
@@ -493,7 +637,6 @@ class CalculateCoverages:
     Attributes:
         coverage_bw_pos: Path to the positive-strand BigWig file.
         coverage_bw_neg: Path to the negative-strand BigWig file.
-        bam_file: Optional BAM path for expression rank statistics.
         f_stat_threshold: Default F-statistic threshold for run().
     """
 
@@ -501,19 +644,15 @@ class CalculateCoverages:
         self,
         coverage_bw_pos,
         coverage_bw_neg,
-        bam_file=None,
         f_stat_threshold=100,
     ):
         """Args:
             coverage_bw_pos: Path to the positive-strand BigWig file.
             coverage_bw_neg: Path to the negative-strand BigWig file.
-            bam_file: Optional BAM file; required only for
-                calculate_segment_expression_stats.
             f_stat_threshold: Default minimum F-statistic for run().
         """
         self.coverage_bw_pos = coverage_bw_pos
         self.coverage_bw_neg = coverage_bw_neg
-        self.bam_file = bam_file
         self.f_stat_threshold = f_stat_threshold
 
     def calculate_coverage_metrics(self, subsegments_df, n_threads=1):
@@ -571,6 +710,7 @@ class CalculateCoverages:
         max_pas_count=10,
         f_stat_threshold=100,
         debug=False,
+        cluster_distance=0,
     ):
         """Evaluate PAS usage patterns across all segments.
 
@@ -583,9 +723,10 @@ class CalculateCoverages:
             raw_cov_df: DataFrame from calculate_coverage_metrics.
             output_tsv_debug: Optional path to write a JSON debug dump.
             n_procs: Number of worker processes.
-            max_pas_count: Skip segments with more PAS than this.
+            max_pas_count: Skip segments with more clusters than this.
             f_stat_threshold: Minimum F-statistic to retain a pattern.
             debug: Emit verbose per-pattern debug log messages.
+            cluster_distance: Forwarded to evaluate_all_pas_usage_patterns.
 
         Returns:
             DataFrame with columns gene_id, segment_id, subsegment_id,
@@ -611,6 +752,7 @@ class CalculateCoverages:
                     debug=debug,
                     max_pas_count=max_pas_count,
                     f_stat_threshold=f_stat_threshold,
+                    cluster_distance=cluster_distance,
                 )
                 for segment_id, subsegments, result in executor.map(
                     func, grouped
@@ -661,6 +803,7 @@ class CalculateCoverages:
                     debug=debug,
                     max_pas_count=max_pas_count,
                     f_stat_threshold=f_stat_threshold,
+                    cluster_distance=cluster_distance,
                 )
                 if not result:
                     continue
@@ -704,136 +847,22 @@ class CalculateCoverages:
             with open(output_tsv_debug, "w") as fh:
                 json.dump(debug_rows, fh, indent=4, default=json_serial)
 
+        cols = [
+            "gene_id",
+            "segment_id",
+            "subsegment_id",
+            "pas_id",
+            "mean_cov",
+            "sum_squared_values",
+            "rna_drop_cov",
+            "rna_sum_drop_cov",
+            "rna_monotone",
+            "rna_usage",
+            "f_stat",
+            "p_value",
+        ]
         usage_df = pd.DataFrame(usage_rows)
-        cols = [
-            "gene_id",
-            "segment_id",
-            "subsegment_id",
-            "pas_id",
-            "mean_cov",
-            "sum_squared_values",
-            "rna_drop_cov",
-            "rna_sum_drop_cov",
-            "rna_monotone",
-            "rna_usage",
-            "f_stat",
-            "p_value",
-        ]
-        return usage_df[cols]
-
-    def calculate_segment_expression_stats(self, usage_df, subsegments_df):
-        """Compute per-segment RPM and median coverage, merge onto usage_df.
-
-        Adds four columns: rpm (reads/segment length from BAM), rpm_rank,
-        median_cov (BigWig), median_rank. Dense rank, 1 = highest.
-
-        Args:
-            usage_df: Per-PAS DataFrame from evaluate_pas_usage_models.
-            subsegments_df: Sub-segment table to derive segment boundaries.
-
-        Returns:
-            usage_df merged with rpm, rpm_rank, median_cov, median_rank.
-
-        Raises:
-            ValueError: If self.bam_file is not set.
-        """
-        # 1) Build segment metadata from the subsegments DataFrame.
-        # subsegments_df already carries segment_id and gene_id directly.
-        seg_meta = subsegments_df.groupby("segment_id", as_index=False).agg(
-            chrom=("chrom", "first"),
-            strand=("strand", "first"),
-            start=("start", "min"),
-            end=("end", "max"),
-        )
-
-        # 2) Count reads per segment via pysam.
-        # Sort by (chrom, start) so bam.count() accesses the BAM index
-        # in roughly sequential order, avoiding random seeks across the
-        # file.  The original row order is restored after counting via
-        # the reset index saved before sorting.
-        if not self.bam_file:
-            raise ValueError("BAM file is required to compute RPM.")
-        seg_meta = (
-            seg_meta.reset_index(drop=True)
-            .sort_values(["chrom", "start"])
-            .reset_index(drop=True)
-        )
-        bam = pysam.AlignmentFile(self.bam_file, "rb")
-        read_counts = []
-        for row in seg_meta.itertuples(index=False):
-            count = bam.count(
-                contig=row.chrom,
-                start=int(row.start),
-                end=int(row.end),
-            )
-            read_counts.append(count)
-        bam.close()
-
-        seg_meta["read_count"] = read_counts
-
-        # 3) Compute rpm and median coverage from BigWig
-        bw_pos = pyBigWig.open(self.coverage_bw_pos)
-        bw_neg = pyBigWig.open(self.coverage_bw_neg)
-
-        def _get_median_cov(r):
-            bw = bw_pos if r["strand"] == "+" else bw_neg
-            vals = bw.values(
-                r["chrom"], int(r["start"]), int(r["end"]), numpy=True
-            )
-            return float(np.nanmedian(np.nan_to_num(vals, nan=0.0)))
-
-        seg_meta["segment_length"] = seg_meta["end"] - seg_meta["start"]
-        seg_meta["rpm"] = seg_meta["read_count"] / seg_meta["segment_length"]
-        seg_meta["median_cov"] = seg_meta.apply(_get_median_cov, axis=1)
-
-        bw_pos.close()
-        bw_neg.close()
-
-        # 4) Dense ranking (highest value → rank 1)
-        seg_meta["rpm_rank"] = (
-            seg_meta["rpm"].rank(method="dense", ascending=False).astype(int)
-        )
-        seg_meta["median_rank"] = (
-            seg_meta["median_cov"]
-            .rank(method="dense", ascending=False)
-            .astype(int)
-        )
-
-        # 5) Merge back onto the PAS-level usage_df
-        merged = usage_df.merge(
-            seg_meta[
-                [
-                    "segment_id",
-                    "rpm",
-                    "rpm_rank",
-                    "median_cov",
-                    "median_rank",
-                ]
-            ],
-            on="segment_id",
-            how="left",
-        )
-
-        # 6) Enforce column order
-        cols = [
-            "gene_id",
-            "segment_id",
-            "subsegment_id",
-            "pas_id",
-            "mean_cov",
-            "sum_squared_values",
-            "rna_drop_cov",
-            "rna_sum_drop_cov",
-            "rna_monotone",
-            "rna_usage",
-            "f_stat",
-            "p_value",
-            "rpm",
-            "rpm_rank",
-            "median_cov",
-            "median_rank",
-        ]
-        return merged[cols]
+        return usage_df.reindex(columns=cols)
 
     def run(
         self,
@@ -843,22 +872,25 @@ class CalculateCoverages:
         max_pas_count=10,
         f_stat_threshold=None,
         debug=False,
+        cluster_distance=0,
     ):
         """Run the full coverage and PAS usage pipeline.
 
-        Computes coverage metrics, evaluates PAS usage models, and
-        optionally computes BAM expression stats. Returns a slimmed
-        coverage table (coverage arrays dropped) alongside the usage
-        DataFrame.
+        Computes coverage metrics and evaluates PAS usage models. Returns
+        a slimmed coverage table (coverage arrays dropped) alongside the
+        usage DataFrame.
 
         Args:
             subsegments_df: Sub-segment coordinate table.
             output_debug_json: Optional path for a JSON debug dump.
             n_threads: Threads for BigWig reading and F-stat workers.
-            max_pas_count: Skip segments with more PAS than this.
+            max_pas_count: Skip segments with more clusters than this.
             f_stat_threshold: F-statistic threshold; falls back to
                 self.f_stat_threshold when None.
             debug: Emit verbose per-pattern debug log messages.
+            cluster_distance: Maximum centre-to-centre distance (bp) to
+                merge consecutive PAS into one cluster for ANOVA.
+                0 = no clustering.
 
         Returns:
             (raw_cov_slim, usage_df) tuple.
@@ -871,8 +903,31 @@ class CalculateCoverages:
             subsegments_df, n_threads=n_threads
         )
 
+        # Merge PAS coordinates and atlas_rpm so the DFS can cluster PAS
+        # and distribute within-cluster drops proportionally.
+        coord_cols = [
+            c for c in ("pas_start", "pas_end", "atlas_rpm")
+            if c in subsegments_df.columns
+        ]
+        if coord_cols:
+            raw_cov_df = raw_cov_df.merge(
+                subsegments_df[["subsegment_id"] + coord_cols]
+                .drop_duplicates("subsegment_id"),
+                on="subsegment_id",
+                how="left",
+            )
+
         # Step 2: PAS usage via F-statistics
-        logger.info("Step 2: Evaluating PAS usage models via F-statistics...")
+        if cluster_distance > 0:
+            logger.info(
+                "Step 2: Evaluating PAS usage models via F-statistics "
+                "(clustering PAS within %d bp)...",
+                cluster_distance,
+            )
+        else:
+            logger.info(
+                "Step 2: Evaluating PAS usage models via F-statistics..."
+            )
         thr = (
             f_stat_threshold
             if f_stat_threshold is not None
@@ -885,6 +940,7 @@ class CalculateCoverages:
             max_pas_count=max_pas_count,
             f_stat_threshold=thr,
             debug=debug,
+            cluster_distance=cluster_distance,
         )
 
         # Return a slimmed raw-coverage table (no large coverage arrays)
@@ -892,13 +948,6 @@ class CalculateCoverages:
         # writing).  Drop the array column before freeing the full frame.
         raw_cov_slim = raw_cov_df.drop(columns=["coverage"], errors="ignore")
         del raw_cov_df
-
-        # Step 3: per-segment expression stats (if BAM provided)
-        if self.bam_file:
-            logger.info("Step 3: Computing per-segment expression stats...")
-            refined_usage_df = self.calculate_segment_expression_stats(
-                refined_usage_df, subsegments_df
-            )
 
         end_time = time.time()
         logger.info("PAS usage evaluation complete.")

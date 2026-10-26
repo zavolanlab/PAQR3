@@ -127,16 +127,83 @@ def _write_bigwig(
     bw.addHeader(sorted(chrom_sizes.items()))
 
     for chrom, grp in df.groupby("chrom", sort=True):
-        grp = grp.sort_values("start")
-        bw.addEntries(
-            chroms=[str(chrom)] * len(grp),
-            starts=grp["start"].astype(int).tolist(),
-            ends=grp["end"].astype(int).tolist(),
-            values=grp[value_col].astype(float).tolist(),
-        )
+        grp = grp.sort_values("start").reset_index(drop=True)
+        starts = grp["start"].astype(int).tolist()
+        ends = grp["end"].astype(int).tolist()
+        values = grp[value_col].astype(float).tolist()
+        try:
+            bw.addEntries(
+                chroms=[str(chrom)] * len(grp),
+                starts=starts,
+                ends=ends,
+                values=values,
+            )
+        except RuntimeError:
+            _diagnose_bigwig_overlap(
+                chrom, starts, ends, values, chrom_sizes, path
+            )
+            bw.close()
+            raise
 
     bw.close()
     logger.info("Written: %s", path)
+
+
+def _diagnose_bigwig_overlap(
+    chrom: str,
+    starts: list[int],
+    ends: list[int],
+    values: list[float],
+    chrom_sizes: dict[str, int],
+    path: str,
+) -> None:
+    """Log the first violations found in a BigWig interval list.
+
+    Args:
+        chrom: Chromosome name being written.
+        starts: Sorted start positions.
+        ends: Corresponding end positions.
+        values: Corresponding values.
+        chrom_sizes: {chrom: size} for boundary checking.
+        path: Output path (for log context).
+    """
+    chrom_size = chrom_sizes.get(chrom, 0)
+    MAX_REPORT = 5
+    reported = 0
+    logger.error(
+        "BigWig write failed on chrom %s (%d entries) for '%s'",
+        chrom, len(starts), path,
+    )
+    prev_end = 0
+    for i, (s, e, v) in enumerate(zip(starts, ends, values)):
+        problems = []
+        if e <= s:
+            problems.append(f"zero/negative length (start={s}, end={e})")
+        if s < prev_end:
+            problems.append(
+                f"overlaps previous entry (prev_end={prev_end}, start={s})"
+            )
+        if chrom_size and e > chrom_size:
+            problems.append(
+                f"end {e} exceeds chrom size {chrom_size}"
+            )
+        if problems:
+            logger.error(
+                "  Entry %d: chrom=%s start=%d end=%d value=%g — %s",
+                i, chrom, s, e, v, "; ".join(problems),
+            )
+            reported += 1
+            if reported >= MAX_REPORT:
+                remaining = sum(
+                    1 for j in range(i + 1, len(starts))
+                    if starts[j] < ends[j - 1] or ends[j] <= starts[j]
+                )
+                if remaining:
+                    logger.error(
+                        "  ... and %d more violation(s) not shown", remaining
+                    )
+                break
+        prev_end = e
 
 
 class PAQR3:
@@ -152,9 +219,9 @@ class PAQR3:
         downstream_exon_extension: int,
         merge_distance: int,
         max_pas_count: int,
-        bam_file: str | None = None,
         f_stat_threshold: int = 100,
         posterior_usage_weight: float = 0.1,
+        pas_cluster_distance: int = 250,
         n_threads: int = 1,
         emit: list[str] | None = None,
         chr_sizes_file: str | None = None,
@@ -168,9 +235,9 @@ class PAQR3:
         self.downstream_exon_extension = downstream_exon_extension
         self.merge_distance = merge_distance
         self.max_pas_count = max_pas_count
-        self.bam_file = bam_file
         self.f_stat_threshold = f_stat_threshold
         self.posterior_usage_weight = posterior_usage_weight
+        self.pas_cluster_distance = pas_cluster_distance
         self.n_threads = n_threads
         self.emit = emit
         self.chr_sizes_file = chr_sizes_file
@@ -214,16 +281,15 @@ class PAQR3:
         chrom_sizes = _load_chrom_sizes(self.chr_sizes_file)
 
         coords = subsegments_df[
-            ["subsegment_id", "chrom", "start", "end"]
+            ["subsegment_id", "chrom", "strand", "start", "end"]
         ].drop_duplicates("subsegment_id")
 
         for mode in bw_modes:
             for source_key, col, coord_type, suffix in _EMIT_BW_SPEC[mode]:
-                out_path = os.path.join(results_dir, f"{sname}_{suffix}.bw")
                 source_df = raw_cov_df if source_key == "raw" else posterior_df
                 if coord_type == "pas" and pas_coords is not None:
                     df_with_coords = source_df.merge(
-                        pas_coords[["pas_id", "chrom", "start", "end"]],
+                        pas_coords[["pas_id", "chrom", "strand", "start", "end"]],
                         on="pas_id",
                         how="left",
                     )
@@ -231,7 +297,18 @@ class PAQR3:
                     df_with_coords = source_df.merge(
                         coords, on="subsegment_id", how="left"
                     )
-                _write_bigwig(df_with_coords, col, chrom_sizes, out_path)
+                for strand_char, strand_tag in [("+", "pos"), ("-", "neg")]:
+                    out_path = os.path.join(
+                        results_dir, f"{sname}_{suffix}.{strand_tag}.bw"
+                    )
+                    _write_bigwig(
+                        df_with_coords[
+                            df_with_coords["strand"] == strand_char
+                        ],
+                        col,
+                        chrom_sizes,
+                        out_path,
+                    )
 
     def run_segment(self, output_dir: str | None = None) -> str:
         """Run the segmentation stage and write the segments TSV.
@@ -314,7 +391,6 @@ class PAQR3:
         cc = CalculateCoverages(
             self.coverage_bw_pos,
             self.coverage_bw_neg,
-            bam_file=self.bam_file,
             f_stat_threshold=self.f_stat_threshold,
         )
         raw_cov_df, usage_df = cc.run(
@@ -324,6 +400,7 @@ class PAQR3:
             max_pas_count=self.max_pas_count,
             f_stat_threshold=self.f_stat_threshold,
             debug=logger.isEnabledFor(logging.DEBUG),
+            cluster_distance=self.pas_cluster_distance,
         )
 
         # Map atlas_rpm via subsegment_id.
@@ -335,6 +412,36 @@ class PAQR3:
         usage_df["atlas_rpm"] = (
             usage_df["subsegment_id"].map(atlas_map).fillna(0.0)
         )
+
+        # Snapshot seg_stats (including rna_monotone) from the full
+        # F-stat-passing set before filtering, so _segment_results.tsv
+        # covers all passing segments with a 0/1 monotone flag.
+        seg_stats = (
+            usage_df[
+                [
+                    "segment_id",
+                    "rna_sum_drop_cov",
+                    "f_stat",
+                    "p_value",
+                    "rna_monotone",
+                ]
+            ]
+            .drop_duplicates("segment_id")
+            .reset_index(drop=True)
+        )
+
+        # Keep only monotone segments for all downstream usage / PAS outputs.
+        n_before = usage_df["segment_id"].nunique()
+        usage_df = usage_df[usage_df["rna_monotone"] == 1].reset_index(
+            drop=True
+        )
+        n_after = usage_df["segment_id"].nunique()
+        if n_before > n_after:
+            logger.info(
+                "Monotonicity filter: kept %d / %d segments "
+                "(dropped %d non-monotone).",
+                n_after, n_before, n_before - n_after,
+            )
 
         cpu = CalculatePosteriorUsage(weight=self.posterior_usage_weight)
         posterior_df = cpu.compute(usage_df)
@@ -354,18 +461,6 @@ class PAQR3:
         gene_usage_df = CalculateGeneLevelUsage(posterior_df).compute()
 
         # _segment_results.tsv
-        seg_stats = (
-            usage_df[
-                [
-                    "segment_id",
-                    "rna_sum_drop_cov",
-                    "f_stat",
-                    "p_value",
-                ]
-            ]
-            .drop_duplicates("segment_id")
-            .reset_index(drop=True)
-        )
         segment_results = seg_coords.merge(
             seg_stats, on="segment_id", how="inner"
         )[
@@ -378,6 +473,7 @@ class PAQR3:
                 "rna_sum_drop_cov",
                 "f_stat",
                 "p_value",
+                "rna_monotone",
             ]
         ].rename(
             columns={"chrom": "chr"}
@@ -589,7 +685,6 @@ class PAQR3:
         cc = CalculateCoverages(
             self.coverage_bw_pos,
             self.coverage_bw_neg,
-            bam_file=self.bam_file,
             f_stat_threshold=self.f_stat_threshold,
         )
         raw_cov_df, usage_df = cc.run(
@@ -599,6 +694,7 @@ class PAQR3:
             max_pas_count=self.max_pas_count,
             f_stat_threshold=self.f_stat_threshold,
             debug=logger.isEnabledFor(logging.DEBUG),
+            cluster_distance=self.pas_cluster_distance,
         )
 
         # Map atlas_rpm from in-memory pas_df (rep_cs → atlas_rpm).
@@ -611,6 +707,36 @@ class PAQR3:
         subsegments_df["atlas_rpm"] = (
             subsegments_df["pas_id"].map(atlas_map).fillna(0.0)
         )
+
+        # Snapshot seg_stats (including rna_monotone) from the full
+        # F-stat-passing set before filtering, so _segment_results.tsv
+        # covers all passing segments with a 0/1 monotone flag.
+        seg_stats = (
+            usage_df[
+                [
+                    "segment_id",
+                    "rna_sum_drop_cov",
+                    "f_stat",
+                    "p_value",
+                    "rna_monotone",
+                ]
+            ]
+            .drop_duplicates("segment_id")
+            .reset_index(drop=True)
+        )
+
+        # Keep only monotone segments for all downstream usage / PAS outputs.
+        n_before = usage_df["segment_id"].nunique()
+        usage_df = usage_df[usage_df["rna_monotone"] == 1].reset_index(
+            drop=True
+        )
+        n_after = usage_df["segment_id"].nunique()
+        if n_before > n_after:
+            logger.info(
+                "Monotonicity filter: kept %d / %d segments "
+                "(dropped %d non-monotone).",
+                n_after, n_before, n_before - n_after,
+            )
 
         cpu = CalculatePosteriorUsage(weight=self.posterior_usage_weight)
         posterior_df = cpu.compute(usage_df)
@@ -630,18 +756,6 @@ class PAQR3:
         )
 
         # _segment_results.tsv
-        seg_stats = (
-            usage_df[
-                [
-                    "segment_id",
-                    "rna_sum_drop_cov",
-                    "f_stat",
-                    "p_value",
-                ]
-            ]
-            .drop_duplicates("segment_id")
-            .reset_index(drop=True)
-        )
         segment_results = seg_coords.merge(
             seg_stats, on="segment_id", how="inner"
         )[
@@ -654,6 +768,7 @@ class PAQR3:
                 "rna_sum_drop_cov",
                 "f_stat",
                 "p_value",
+                "rna_monotone",
             ]
         ].rename(
             columns={"chrom": "chr"}
