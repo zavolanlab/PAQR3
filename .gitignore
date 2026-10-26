@@ -171,8 +171,9 @@ cython_debug/
 .pypirc
 
 .vscode
-data/*
-results/*
-cluster_scripts/*
-igv/*
+.sandbox-state
+data/
+results/
+cluster_scripts/
+igv/
 CLAUDE.md

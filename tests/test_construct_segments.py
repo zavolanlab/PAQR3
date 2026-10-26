@@ -77,7 +77,6 @@ def _make_cs(**kwargs) -> ConstructSegments:
         annotation_file=kwargs.get("annotation_file", ""),
         pas_atlas_file=kwargs.get("pas_atlas_file", ""),
         downstream_exon_extension=kwargs.get("downstream_exon_extension", 200),
-        te_anchor_window=kwargs.get("te_anchor_window", 50),
     )
 
 
@@ -258,26 +257,26 @@ class TestConstructSegments:
         assert all(o == "TE" for o in origins)
 
     def _run_multi(
-        self, gene_id, transcripts_exons, strand="+", ext=200, window=50
+        self, gene_id, transcripts_exons, strand="+", ext=200
     ):
         gene = _make_multi_tx_gene(gene_id, transcripts_exons, strand=strand)
-        cs = _make_cs(downstream_exon_extension=ext, te_anchor_window=window)
+        cs = _make_cs(downstream_exon_extension=ext)
         cs.genes = {gene_id: gene}
         cs.define_exons_introns()
         cs.construct_segments()
         return cs, gene
 
     def test_mixed_region_labelled_alternative(self):
-        # tx1/tx2 share a terminal-exon start at 1000 but end at 1100 (real
-        # intron 1100-1300 before resuming at 1300); tx3 reads straight
-        # through as one continuous exon 1000-1600 (intron retention).
-        # 1100-1300 is exonic for tx3 but intronic for tx1/tx2 -> AL.
+        # tx1/tx2 share a first exon 1000-1100 (real intron 1100-1300
+        # before resuming at 1300); tx3 reads straight through as one
+        # continuous exon 1000-1350 (intron retention), ending inside the
+        # anchor. 1100-1300 is exonic for tx3 but intronic for tx1/tx2.
         _, gene = self._run_multi(
             "g1",
             [
                 [(1000, 1100), (1300, 1400)],
                 [(1000, 1100), (1300, 1400)],
-                [(1000, 1600)],
+                [(1000, 1350)],
             ],
         )
         origins = {
@@ -287,15 +286,15 @@ class TestConstructSegments:
         assert origins[(1100, 1300)] == "AL"
 
     def test_only_one_te_segment_with_multiple_terminal_exons(self):
-        # Same gene as above: tx3 is single-exon, so the anchor comes from
-        # the spliced tx1/tx2 terminal exon (1300-1400); the island still
-        # runs to the gene's 3' end (1600) and is exactly one TE segment.
+        # Same gene as above: tx3's terminal exon ends short of the gene's
+        # 3' end (1400), so only tx1/tx2's last exon defines the island
+        # and there is exactly one TE segment.
         _, gene = self._run_multi(
             "g1",
             [
                 [(1000, 1100), (1300, 1400)],
                 [(1000, 1100), (1300, 1400)],
-                [(1000, 1600)],
+                [(1000, 1350)],
             ],
         )
         te_segs = [
@@ -304,7 +303,7 @@ class TestConstructSegments:
             if s.attributes.get("segment_origin") == "TE"
         ]
         assert len(te_segs) == 1
-        assert (te_segs[0].start, te_segs[0].end) == (1300, 1600)
+        assert (te_segs[0].start, te_segs[0].end) == (1300, 1400)
 
     def test_shared_exon_before_alternative_not_terminal(self):
         # The shared 1000-1100 span (exonic for every transcript, upstream
@@ -314,7 +313,7 @@ class TestConstructSegments:
             [
                 [(1000, 1100), (1300, 1400)],
                 [(1000, 1100), (1300, 1400)],
-                [(1000, 1600)],
+                [(1000, 1350)],
             ],
         )
         origins = {
@@ -394,21 +393,35 @@ class TestConstructSegments:
         assert not any(750 in (s, e) for s, e in origins)
         assert origins[(1000, 2000)] == "TE"
 
-    @pytest.mark.parametrize("window, te", [(50, (1000, 2030)),
-                                            (0, (1900, 2030))])
-    def test_anchor_window_merges_near_three_prime_ends(self, window, te):
-        # tx2's short last exon ends 30 bp past tx1's long one: within the
-        # window the long exon still defines the island, without it not.
+    def test_anchor_requires_exact_three_prime_end(self):
+        # tx2's short last exon ends 30 bp past tx1's long one, so it alone
+        # is the anchor; tx1's upstream body does not join the island.
         _, gene = self._run_multi(
             "g1",
             [
                 [(100, 200), (1000, 2000)],
                 [(100, 200), (1200, 1300), (1900, 2030)],
             ],
-            window=window,
         )
         te_segs = [k for k, v in self._origins(gene).items() if v == "TE"]
-        assert te_segs == [te]
+        assert te_segs == [(1900, 2030)]
+
+    def test_anchor_uses_unextended_three_prime_end(self):
+        # BHLHE23-like (- strand): g2's two single-exon transcripts end 50 bp
+        # apart (1000 vs 1050); extension is capped at g1's end (900), so
+        # both extended exons start at 900. Only tx1 reaches the annotated
+        # 3' end, so the island stops at its 5' edge (2000), not tx2's.
+        g1 = _make_gene("g1", [(100, 900)], strand="-")
+        g2 = _make_multi_tx_gene(
+            "g2", [[(1000, 2000)], [(1050, 2070)]], strand="-"
+        )
+        cs = _make_cs(downstream_exon_extension=200)
+        cs.genes = {"g1": g1, "g2": g2}
+        cs.extend_gene_coordinates()
+        cs.extend_exon_downstream()
+        cs.define_exons_introns()
+        cs.construct_segments()
+        assert self._origins(g2) == {(900, 2000): "TE", (2000, 2070): "EX"}
 
 
 # ---------------------------------------------------------------------------
@@ -764,6 +777,24 @@ class TestExtendGeneCoordinatesSkips:
         gene.add_transcript(tx)
         cs.genes = {"g1": gene}
         cs.extend_gene_coordinates()  # must not crash (line 208)
+
+    @pytest.mark.parametrize("strand", ["+", "-"])
+    def test_extension_book_ends_neighbour(self, strand):
+        # The downstream gene is 100 bp away (< 200 bp extension): the
+        # extended gene must end exactly at it on both strands, no gap.
+        if strand == "+":
+            genes = {"a": _make_gene("a", [(0, 1000)], "+"),
+                     "b": _make_gene("b", [(1100, 2000)], "+")}
+        else:
+            genes = {"a": _make_gene("a", [(0, 1000)], "-"),
+                     "b": _make_gene("b", [(1100, 2000)], "-")}
+        cs = _make_cs(downstream_exon_extension=200)
+        cs.genes = genes
+        cs.extend_gene_coordinates()
+        if strand == "+":
+            assert genes["a"].attributes["end"] == 1100
+        else:
+            assert genes["b"].attributes["start"] == 1000
 
     def test_overlapping_minus_genes_while_loop(self):
         cs = _make_cs(downstream_exon_extension=200)

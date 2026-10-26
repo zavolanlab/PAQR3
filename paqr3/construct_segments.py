@@ -45,8 +45,6 @@ class ConstructSegments:
         pas_atlas_file: Path to the PAS atlas BED file.
         downstream_exon_extension: Bases to extend terminal exons and
             gene boundaries downstream.
-        te_anchor_window: Terminal exons whose 3' end lies within this
-            many bp of the most 3'-extreme one also define the TE island.
         genes: Mapping from gene ID to Gene after parsing.
         gene_mapping: Original gene ID to integer unique gene ID.
         pas_df: DataFrame of merged PAS sites from process_pas_atlas().
@@ -57,21 +55,16 @@ class ConstructSegments:
         annotation_file: str,
         pas_atlas_file: str,
         downstream_exon_extension: int,
-        te_anchor_window: int = 50,
     ) -> None:
         """Args:
             annotation_file: Path to the GTF annotation file.
             pas_atlas_file: Path to the PAS atlas BED file.
             downstream_exon_extension: Bases to extend terminal exons
                 and gene boundaries in the 3′ direction.
-            te_anchor_window: Terminal exons whose 3' end lies within
-                this many bp of the most 3'-extreme one also define the
-                TE island (see construct_segments).
         """
         self.annotation_file = annotation_file
         self.pas_atlas_file = pas_atlas_file
         self.downstream_exon_extension = downstream_exon_extension
-        self.te_anchor_window = te_anchor_window
         self.genes: dict[str, Gene] = {}
         self.gene_mapping: dict[str, int] = {}
         self.pas_df: pd.DataFrame | None = None
@@ -233,7 +226,9 @@ class ConstructSegments:
                 # as strictly downstream ones.
                 idx = bisect.bisect_left(starts, gene_end)
                 if idx < len(entries):
-                    next_gene_start = min(potential_end, entries[idx][0] - 1)
+                    # Half-open coords: ending at the next start book-ends
+                    # it without overlap (as prev_end does on "-").
+                    next_gene_start = min(potential_end, entries[idx][0])
                 # max(gene_end, ...) prevents shrinking a gene that already
                 # reaches or shares the boundary with the next gene.
                 gene_end = max(gene_end, min(potential_end, next_gene_start))
@@ -284,6 +279,13 @@ class ConstructSegments:
                             )
                         ),
                     )
+                    # Remember the annotated 3' end: capping at a
+                    # neighbouring gene can make extended ends coincide.
+                    terminal_exon.attributes["unextended_3p_end"] = (
+                        terminal_exon.end
+                        if terminal_exon.strand == "+"
+                        else terminal_exon.start
+                    )
                     gene_end: int = gene.attributes["end"]
                     gene_start_attr: int = gene.attributes["start"]
                     if terminal_exon.strand == "+":
@@ -302,6 +304,13 @@ class ConstructSegments:
                     terminal_exon = min(
                         transcript.regions,
                         key=lambda r: r.start,
+                    )
+                    # Remember the annotated 3' end: capping at a
+                    # neighbouring gene can make extended ends coincide.
+                    terminal_exon.attributes["unextended_3p_end"] = (
+                        terminal_exon.end
+                        if terminal_exon.strand == "+"
+                        else terminal_exon.start
                     )
                     gene_end = gene.attributes["end"]
                     gene_start_attr = gene.attributes["start"]
@@ -373,15 +382,12 @@ class ConstructSegments:
 
         Each gene gets exactly one terminal-exon ("TE") segment, the TE
         island: from the 5' edge of the anchor to the gene's 3' end.
-        The anchor is the gene's most 3'-extreme terminal exon, widened
-        to the furthest-5' start among terminal exons whose 3' end lies
-        within te_anchor_window bp of it (so a short spliced last exon
-        ending a few bp further 3' cannot displace a long-UTR one).
-        Only multi-exon transcripts are considered for the anchor when
-        the gene has any, since a single-exon transcript's exon is not
-        a terminal exon in the splice sense. Every boundary strictly
-        inside the island is suppressed, including other transcripts'
-        introns, so it is always one segment.
+        The anchor is the union of all terminal exons whose annotated
+        (pre-extension) 3' end is exactly the gene's most 3' one;
+        terminal exons ending anywhere upstream of it do not widen the
+        island. Every boundary strictly inside the island is
+        suppressed, including other transcripts' introns, so it is
+        always one segment.
 
         Terminal-exon 3' ends never create a boundary (apart from the
         gene end itself), so a PAS at the 3' end of an upstream-ending
@@ -411,26 +417,18 @@ class ConstructSegments:
             all_regions.sort(key=lambda x: (x[0], x[1]))
 
             # Pre-collect region lists: all exons/introns (for overlap
-            # classification) and terminal exons (to find the anchor),
-            # split by whether their transcript is spliced.
+            # classification) and terminal exons (to find the anchor).
             gene_introns: list[Region] = []
             gene_exons: list[Region] = []
-            spliced_terminal_exons: list[Region] = []
-            single_exons: list[Region] = []
+            gene_terminal_exons: list[Region] = []
             for transcript in gene.transcripts.values():
-                tx_exons = [
-                    r for r in transcript.regions if r.region_type == "exon"
-                ]
-                gene_exons.extend(tx_exons)
-                gene_introns.extend(
-                    r for r in transcript.regions if r.region_type == "intron"
-                )
-                for r in tx_exons:
-                    if r.attributes.get("is_terminal_exon", False):
-                        if len(tx_exons) > 1:
-                            spliced_terminal_exons.append(r)
-                        else:
-                            single_exons.append(r)
+                for r in transcript.regions:
+                    if r.region_type == "intron":
+                        gene_introns.append(r)
+                    elif r.region_type == "exon":
+                        gene_exons.append(r)
+                        if r.attributes.get("is_terminal_exon", False):
+                            gene_terminal_exons.append(r)
 
             # Every region edge is a boundary except terminal-exon 3'
             # ends; the gene's own 3' end is added back explicitly.
@@ -442,24 +440,29 @@ class ConstructSegments:
                 if not (is_te and strand == "+"):
                     segment_boundaries.add(end)
 
+            # Anchor: terminal exons whose annotated (pre-extension) 3' end
+            # is exactly the gene's most 3' one; their union, from its 5'
+            # edge to the gene end, is the TE island.
+            def _three_prime(r: Region, strand: str | None = strand) -> int:
+                default = r.end if strand == "+" else r.start
+                return int(r.attributes.get("unextended_3p_end", default))
+
             te_island: tuple[int, int] | None = None
-            anchor_candidates = spliced_terminal_exons or single_exons
-            if anchor_candidates:
-                w = self.te_anchor_window
+            if gene_terminal_exons:
                 if strand == "+":
-                    best = max(r.end for r in anchor_candidates)
+                    best = max(_three_prime(r) for r in gene_terminal_exons)
                     te_start = min(
                         r.start
-                        for r in anchor_candidates
-                        if best - r.end <= w
+                        for r in gene_terminal_exons
+                        if _three_prime(r) == best
                     )
                     te_island = (te_start, gene_end)
                 else:
-                    best = min(r.start for r in anchor_candidates)
+                    best = min(_three_prime(r) for r in gene_terminal_exons)
                     te_end = max(
                         r.end
-                        for r in anchor_candidates
-                        if r.start - best <= w
+                        for r in gene_terminal_exons
+                        if _three_prime(r) == best
                     )
                     te_island = (gene_start, te_end)
 

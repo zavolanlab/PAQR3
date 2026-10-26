@@ -226,7 +226,6 @@ class PAQR3:
         emit: list[str] | None = None,
         chr_sizes_file: str | None = None,
         use_gzip: bool = True,
-        te_anchor_window: int = 50,
     ) -> None:
         self.annotation_file = annotation_file
         self.pas_atlas_file = pas_atlas_file
@@ -234,7 +233,6 @@ class PAQR3:
         self.coverage_bw_neg = coverage_bw_neg
         self.output_dir = output_dir
         self.downstream_exon_extension = downstream_exon_extension
-        self.te_anchor_window = te_anchor_window
         self.merge_distance = merge_distance
         self.max_pas_count = max_pas_count
         self.f_stat_threshold = f_stat_threshold
@@ -334,7 +332,6 @@ class PAQR3:
             self.annotation_file,
             self.pas_atlas_file,
             self.downstream_exon_extension,
-            te_anchor_window=self.te_anchor_window,
         )
         cs.run(
             segments_tsv,
@@ -669,7 +666,6 @@ class PAQR3:
             self.annotation_file,
             self.pas_atlas_file,
             self.downstream_exon_extension,
-            te_anchor_window=self.te_anchor_window,
         )
         cs.run(
             merge_distance=self.merge_distance,
