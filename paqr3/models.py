@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -28,8 +28,8 @@ class Region:
     start: int
     end: int
     strand: str
-    exon_number: Optional[int] = None
-    intron_number: Optional[int] = None
+    exon_number: int | None = None
+    intron_number: int | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
     subsegments: list[Region] = field(default_factory=list)
 

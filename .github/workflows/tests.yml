@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main, dev]
   push:
-    branches: [main]
+    branches: [main, dev]
 
 jobs:
   test:
@@ -12,20 +12,28 @@ jobs:
 
     defaults:
       run:
-        shell: bash -l {0}
+        shell: bash -el {0}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Conda
-        uses: conda-incubator/setup-miniconda@v3
+      # micromamba solves faster than conda, and the cached env is reused
+      # until install/environment-dev.yml changes.
+      - name: Set up environment (micromamba)
+        uses: mamba-org/setup-micromamba@v2
         with:
           environment-file: install/environment-dev.yml
-          activate-environment: paqr3
-          auto-activate-base: false
+          environment-name: paqr3
+          cache-environment: true
+          cache-downloads: true
 
-      - name: Lint (flake8)
-        run: flake8 paqr3/
+      # The cached env may hold an older editable install; reinstall the
+      # checked-out package without touching dependencies.
+      - name: Install paqr3
+        run: pip install --no-deps -e .
+
+      - name: Lint (ruff)
+        run: ruff check paqr3/ tests/
 
       - name: Type check (mypy)
         run: mypy paqr3/

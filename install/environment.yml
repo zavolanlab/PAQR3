@@ -9,11 +9,8 @@ dependencies:
   - scipy>=1.7.0
   - intervaltree
   - gtfparse
-  - HTSeq
   - pybedtools
-  - deeptools
-  - ucsc-gtftogenepred
-  - ucsc-bedgraphtobigwig
+  - pybigwig
   - pigz
   - pip >=20.2.3
   - pip:

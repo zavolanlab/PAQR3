@@ -10,7 +10,6 @@ from functools import partial
 import numpy as np
 import pandas as pd  # type: ignore
 import pyBigWig  # type: ignore
-from pybedtools import BedTool  # type: ignore
 from scipy.stats import f  # type: ignore
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
@@ -296,11 +295,11 @@ def evaluate_all_pas_usage_patterns(
             overall_mean = float(np.mean(all_covs))
             ss_between = sum(
                 len(arr) * (gm - overall_mean) ** 2
-                for arr, gm in zip(group_arrays, all_means)
+                for arr, gm in zip(group_arrays, all_means, strict=True)
             )
             ss_within = sum(
                 float(np.sum((arr - gm) ** 2))
-                for arr, gm in zip(group_arrays, all_means)
+                for arr, gm in zip(group_arrays, all_means, strict=True)
             )
             df_b = len(complete) - 1
             df_w = len(all_covs) - len(complete)
@@ -480,7 +479,8 @@ def evaluate_all_pas_usage_patterns(
 
     return {
         "pas_usage": {
-            pid: usage for pid, usage in zip(unique_pas_ids, usage_per_pas)
+            pid: usage
+            for pid, usage in zip(unique_pas_ids, usage_per_pas, strict=True)
         },
         "f_stat": best_f,
         "p_value": best_p,
@@ -532,7 +532,7 @@ def compute_drops_and_usage(group):
 
     rna_usage = [
         (drop / sum_drops if sum_drops > 0 else 0.0) if pid != "." else None
-        for drop, pid in zip(drops, pas_ids)
+        for drop, pid in zip(drops, pas_ids, strict=True)
     ]
 
     group["rna_drop_cov"] = drops

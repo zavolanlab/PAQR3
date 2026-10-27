@@ -8,7 +8,6 @@ import pytest
 from paqr3.construct_segments import ConstructSegments
 from paqr3.models import Gene, Region, Transcript
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

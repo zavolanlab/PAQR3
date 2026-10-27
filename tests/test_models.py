@@ -1,9 +1,7 @@
 """Unit tests for paqr3.models."""
 
-import pytest
 
 from paqr3.models import Gene, Region, Transcript
-
 
 # ---------------------------------------------------------------------------
 # Region

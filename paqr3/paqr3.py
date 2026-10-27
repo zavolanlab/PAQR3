@@ -9,10 +9,10 @@ import subprocess
 import pandas as pd  # type: ignore
 import pyBigWig  # type: ignore
 
-from paqr3.construct_segments import ConstructSegments
 from paqr3.calculate_cov_metrics import CalculateCoverages
-from paqr3.calculate_posterior_usage import CalculatePosteriorUsage
 from paqr3.calculate_gene_level_usages import CalculateGeneLevelUsage
+from paqr3.calculate_posterior_usage import CalculatePosteriorUsage
+from paqr3.construct_segments import ConstructSegments
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +175,7 @@ def _diagnose_bigwig_overlap(
         chrom, len(starts), path,
     )
     prev_end = 0
-    for i, (s, e, v) in enumerate(zip(starts, ends, values)):
+    for i, (s, e, v) in enumerate(zip(starts, ends, values, strict=True)):
         problems = []
         if e <= s:
             problems.append(f"zero/negative length (start={s}, end={e})")

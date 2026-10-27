@@ -5,8 +5,8 @@ import logging
 import sys
 from pathlib import Path
 
-from paqr3.version import __version__
 from paqr3.paqr3 import PAQR3
+from paqr3.version import __version__
 
 logging.basicConfig(
     format="[{asctime}] {message}",
